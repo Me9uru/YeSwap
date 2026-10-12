@@ -36,7 +36,6 @@ backups/
 # Python
 __pycache__/
 *.py[cod]
-.venv/
 venv/
 .pytest_cache/
 .ruff_cache/
@@ -46,8 +45,5 @@ venv/
 .vscode/
 .DS_Store
 
-# Frontend development dependencies
+# Frontend development dependencies; the production bundle under web/dist is distributed
 node_modules/
-
-# Vite development cache (production bundle under web/dist is distributed)
-web/node_modules/
