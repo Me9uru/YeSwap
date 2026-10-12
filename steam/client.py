@@ -266,6 +266,36 @@ def fetch_history(
     cookies: Optional[Union[dict, str]] = None,
     return_currency: bool = False,
 ) -> Union[Optional[list], Optional[dict]]:
+    data, _, _ = fetch_history_with_meta(
+        market_hash_name,
+        app_id,
+        headers=headers,
+        timeout=timeout,
+        verify=verify,
+        proxies=proxies,
+        cookies=cookies,
+        return_currency=return_currency,
+    )
+    return data
+
+
+def fetch_history_with_meta(
+    market_hash_name: str,
+    app_id: int = 730,
+    *,
+    headers: Optional[dict] = None,
+    timeout: int = 15,
+    verify: bool = False,
+    proxies: Optional[dict] = None,
+    cookies: Optional[Union[dict, str]] = None,
+    return_currency: bool = False,
+) -> Tuple[Union[Optional[list], Optional[dict]], Optional[int], Optional[float]]:
+    """Fetch price history and retain response metadata for rate-limit handling.
+
+    The public ``fetch_history`` API intentionally continues to return only
+    data.  Callers that need to distinguish HTTP 429 from a normal failed
+    request use this internal companion instead.
+    """
     encoded = quote(market_hash_name, safe="")
     url = f"https://steamcommunity.com/market/pricehistory/?appid={app_id}&market_hash_name={encoded}"
     h = {**DEFAULT_HEADERS, **(headers or {})}
@@ -288,17 +318,23 @@ def fetch_history(
             timeout=timeout,
         )
         if resp.status_code != 200:
-            return None
+            retry_after = None
+            if resp.status_code == 429:
+                try:
+                    retry_after = max(0.0, float(resp.headers.get("Retry-After", "")))
+                except (TypeError, ValueError):
+                    pass
+            return None, resp.status_code, retry_after
         data = resp.json()
         if not data or not data.get("success") or "prices" not in data:
-            return None
+            return None, resp.status_code, None
         history = data["prices"]
         if return_currency:
             currency_clue = data.get("price_prefix", "") + data.get("price_suffix", "")
             currency = detect_currency(currency_clue)
             if not currency:
                 currency = detect_currency(resp.text)
-            return {"history": history, "currency": currency}
-        return history
+            return {"history": history, "currency": currency}, resp.status_code, None
+        return history, resp.status_code, None
     except Exception:
-        return None
+        return None, None, None

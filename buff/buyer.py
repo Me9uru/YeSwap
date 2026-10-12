@@ -142,14 +142,7 @@ API_ASK_SELLER_SEND = "https://buff.163.com/api/market/bill_order/ask_seller_to_
 API_STEAM_TRADE = "https://buff.163.com/api/market/steam_trade"
 ASK_SELLER_MAX_ATTEMPTS = 3
 ASK_SELLER_BETWEEN_REQUEST_SECONDS = 1.5
-def _parse_cookies(cookie_str: str) -> dict:
-    out = {}
-    for item in cookie_str.split(";"):
-        s = item.strip()
-        if "=" in s:
-            k, _, v = s.partition("=")
-            out[k.strip()] = v.strip()
-    return out
+from utils.cookies import parse_cookies as _parse_cookies
 def _csrf(cookies_dict: dict) -> str:
     return cookies_dict.get("csrf_token", "").strip('"')
 
@@ -228,6 +221,14 @@ class BuffBuyer:
             request_policy if request_policy is not None else get_global_policy()
         )
         self.request_timeout = max(1.0, float(request_timeout))
+        # Kept deliberately small and credential-free.  When a checkout was
+        # created but its QR-code lookup fails, this gives operators enough
+        # context to distinguish a transient empty response from an API or
+        # transport problem without persisting request headers, cookies or a
+        # payment URL.
+        self.last_payment_lookup_diagnostic: dict = {}
+        self._last_response_meta: dict = {}
+        self._last_payment_lookup_response: dict = {}
         self.account_key = account_fingerprint(self.cookies_dict, account_id)
         self._user_agent = user_agent or DEFAULT_USER_AGENT
         self.headers = {
@@ -334,6 +335,7 @@ class BuffBuyer:
                 h["X-Csrftoken"] = self.csrf_token
 
             try:
+                request_started_at = time.monotonic()
                 r = self.session.request(
                     method,
                     url,
@@ -367,6 +369,13 @@ class BuffBuyer:
                     json_ok = True
             except ValueError:
                 pass
+
+            self._last_response_meta = {
+                "method": method,
+                "status_code": status_code,
+                "elapsed_ms": round((time.monotonic() - request_started_at) * 1000),
+                "json_ok": json_ok,
+            }
 
             if status_code in {403, 412}:
                 message = (
@@ -508,11 +517,19 @@ class BuffBuyer:
         params = {
             "game": game,
             "page_num": "1",
+            # BUFF currently rejects page_size=1. Ten is the smallest accepted
+            # value and needs no volatile order-state filter.
             "page_size": "10",
-            "state": "wait_pay",
             "_": str(int(time.time() * 1000)),
         }
         response = self._make_request("GET", API_HISTORY, params=params)
+        # Keep only the server's already-sanitised JSON result for the caller
+        # to explain a failed manual-login probe.  No request headers or
+        # Cookie values are retained here.
+        self.last_session_verification_result = {
+            "code": response.get("code"),
+            "error": response.get("error") or response.get("msg") or response.get("message"),
+        }
         return response.get("code") == "OK"
 
     def get_steam_trades(self) -> Optional[list]:
@@ -812,21 +829,9 @@ class BuffBuyer:
                     error.order_id = new_order_id
                     raise error from exc
             pay_type = "wechat" if self.pay_method == PAY_METHOD_WECHAT else "alipay"
-            try:
-                if self.pay_method == PAY_METHOD_WECHAT:
-                    jittered_sleep(0.5)
-                    pay_url = self._get_wechat_pay_url(game, new_order_id)
-                else:
-                    pay_url = self._get_alipay_url(game, new_order_id)
-            except Exception as exc:
-                logger.warning(
-                    "BUFF 订单 %s 已创建，但获取支付链接失败: %s",
-                    new_order_id,
-                    exc,
-                )
-                pay_url = None
+            pay_url = self._fetch_created_order_payment_url(game, new_order_id)
             if not isinstance(pay_url, str) or not pay_url.strip():
-                return {
+                pending_result = {
                     "success": False,
                     "code": "CREATED_WITHOUT_PAY_URL",
                     "created": True,
@@ -834,6 +839,12 @@ class BuffBuyer:
                     "pay_type": pay_type,
                     "order_id": new_order_id,
                 }
+                diagnostic_message = str(
+                    self.last_payment_lookup_diagnostic.get("message") or ""
+                ).strip()
+                if diagnostic_message:
+                    pending_result["msg"] = diagnostic_message
+                return pending_result
             pay_url = pay_url.strip()
             return {
                 "success": True,
@@ -845,6 +856,111 @@ class BuffBuyer:
             raise
         except Exception as e:
             return {"success": False, "code": "FAIL", "msg": str(e)}
+
+    def _fetch_created_order_payment_url(
+        self, game: str, order_id: str
+    ) -> Optional[str]:
+        """Fetch a newly-created order's payment URL with bounded read retries.
+
+        BUFF can acknowledge a buy before its payment QR code is materialised.
+        These are GET-only retries: they never create or alter another order.
+        """
+
+        lookup = (
+            self._get_wechat_pay_url
+            if self.pay_method == PAY_METHOD_WECHAT
+            else self._get_alipay_url
+        )
+        payment_kind = "wechat" if self.pay_method == PAY_METHOD_WECHAT else "alipay"
+        # The first short delay preserves the original flow.  Later retries
+        # cover the normal eventual-consistency window without turning a read
+        # issue into a second non-idempotent buy request.
+        delays = (0.5, 1.0, 2.0, 4.0)
+        for attempt, delay in enumerate(delays, start=1):
+            jittered_sleep(delay)
+            self._last_payment_lookup_response = {}
+            self._last_response_meta = {}
+            try:
+                pay_url = lookup(game, order_id)
+            except Exception as exc:
+                self._record_payment_lookup_diagnostic(
+                    payment_kind, order_id, attempt, len(delays), exception=exc
+                )
+                # Preserve the existing created-pending contract: once the
+                # POST has created an order, a later read-side auth/risk error
+                # is not evidence that the order disappeared.  The request
+                # policy still retains its circuit state; do not keep retrying
+                # after an explicit exception.
+                return None
+            if isinstance(pay_url, str) and pay_url.strip():
+                if attempt > 1:
+                    logger.info(
+                        "BUFF 订单 %s 的 %s 支付链接在第 %d 次查询取得",
+                        order_id,
+                        payment_kind,
+                        attempt,
+                    )
+                return pay_url.strip()
+            self._record_payment_lookup_diagnostic(
+                payment_kind, order_id, attempt, len(delays)
+            )
+        return None
+
+    def _record_payment_lookup_diagnostic(
+        self,
+        payment_kind: str,
+        order_id: str,
+        attempt: int,
+        attempts: int,
+        *,
+        response: Optional[dict] = None,
+        exception: Optional[Exception] = None,
+    ) -> None:
+        """Record a sanitised payment-lookup outcome for troubleshooting."""
+
+        result = (
+            response
+            if isinstance(response, dict)
+            else self._last_payment_lookup_response
+            if isinstance(self._last_payment_lookup_response, dict)
+            else {}
+        )
+        # The lookup helpers stash their safe response summary before calling
+        # this helper.  Never retain response values: payment URLs and other
+        # checkout details must not leak into logs or status objects.
+        meta = dict(self._last_response_meta)
+        data = result.get("data")
+        message = result.get("error") or result.get("msg") or result.get("message")
+        diagnostic = {
+            "payment_kind": payment_kind,
+            "order_id": str(order_id),
+            "attempt": int(attempt),
+            "attempts": int(attempts),
+            "http_status": meta.get("status_code"),
+            "elapsed_ms": meta.get("elapsed_ms"),
+            "code": str(result.get("code") or ""),
+            "data_type": type(data).__name__,
+            "data_keys": sorted(str(key) for key in data.keys())[:20]
+            if isinstance(data, dict)
+            else [],
+            "error_type": type(exception).__name__ if exception else "",
+            "message": str(exception or message or "")[:300],
+        }
+        self.last_payment_lookup_diagnostic = diagnostic
+        logger.warning(
+            "BUFF 支付链接查询未成功 order_id=%s kind=%s attempt=%d/%d "
+            "http=%s code=%s data_type=%s data_keys=%s error=%s",
+            diagnostic["order_id"],
+            diagnostic["payment_kind"],
+            diagnostic["attempt"],
+            diagnostic["attempts"],
+            diagnostic["http_status"],
+            diagnostic["code"] or "-",
+            diagnostic["data_type"],
+            ",".join(diagnostic["data_keys"]) or "-",
+            diagnostic["message"] or "-",
+        )
+
     def _get_alipay_url(self, game: str, order_id: str) -> Optional[str]:
         params = {"bill_order_id": str(order_id), "_": str(int(time.time() * 1000))}
         h = {
@@ -854,6 +970,7 @@ class BuffBuyer:
         }
         try:
             res = self._make_request("GET", API_PAGE_PAY, params=params, headers=h)
+            self._last_payment_lookup_response = res if isinstance(res, dict) else {}
             if res.get("code") == "OK":
                 data = res.get("data", {})
                 return data.get("elements_v2", {}).get("alipay", {}).get("url") or data.get("elements", {}).get("url") or data.get("url")
@@ -867,6 +984,7 @@ class BuffBuyer:
         h = {"Referer": f"https://buff.163.com/market/buy_order/history?game={game}"}
         try:
             res = self._make_request("GET", API_WX_PAY_QRCODE, params=params, headers=h)
+            self._last_payment_lookup_response = res if isinstance(res, dict) else {}
             if res.get("code") == "OK":
                 data = res.get("data", {})
                 return data.get("url") or data.get("elements_v2", {}).get("wechatpay", {}).get("url")
@@ -895,7 +1013,7 @@ class BuffBuyer:
             logger.info("进入支付等待期 30 秒...")
             time.sleep(30)
         except ImportError:
-            logger.warning("未安装 qrcode，请执行: pip install qrcode[pil]")
+            logger.warning("未安装 qrcode，请执行: uv sync")
             logger.info("支付链接: %s", url)
             time.sleep(30)
         except Exception as e:

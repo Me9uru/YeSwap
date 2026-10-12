@@ -1,17 +1,17 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.strategy_engine import (
-    StrategyError,
+from app.strategies.catalog import StrategyError
+from app.strategies.management import (
     activate_strategy,
     delete_strategy,
     export_strategy,
     get_strategy_payload,
     import_strategy,
-    import_user_module,
     save_strategy,
-    simulate_strategy,
 )
+from app.strategies.registry import import_user_module
+from app.strategies.simulation import simulate_strategy
 
 
 router = APIRouter()

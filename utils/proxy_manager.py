@@ -11,13 +11,21 @@ import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
+_config_provider = lambda: {}
+_log_sink = None
+
+
+def configure_proxy_runtime(config_provider, log_sink=None) -> None:
+    global _config_provider, _log_sink
+    _config_provider, _log_sink = config_provider, log_sink
+
+
 def _load_proxy_pool_cfg() -> dict:
     try:
-        from app.config_loader import load_app_config_validated
-        cfg = load_app_config_validated()
-        return cfg.get("proxy_pool", {})
+        return _config_provider().get("proxy_pool", {})
     except Exception:
         return {}
+
 def _build_proxy_url(p: dict) -> str:
     host = p.get("host", "")
     port = p.get("port", 0)
@@ -27,11 +35,9 @@ def _build_proxy_url(p: dict) -> str:
         return f"http://{user}:{pwd}@{host}:{port}/"
     return f"http://{host}:{port}/"
 def _pm_log(msg: str) -> None:
-    try:
-        from app.state import log as app_log
-        app_log(msg, "debug", category="proxy")
-    except Exception:
-        pass
+    if _log_sink is not None:
+        _log_sink(msg, "debug", category="proxy")
+
 def test_one_proxy(proxy_cfg: dict, test_url: str, timeout: int) -> dict:
     proxy_url = _build_proxy_url(proxy_cfg)
     proxies = {"http": proxy_url, "https": proxy_url}

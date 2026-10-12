@@ -1,16 +1,16 @@
 <div align="center">
 
 
-<h1>⚗️ AetherSwap</h1>
+<h1>⚗️ YeSwap</h1>
 
 <p><strong>全自动、零代码配置的 Steam 低价余额助手</strong><br>跨区购买 · 行情分析 · 数据复盘 · 全可视化控制台</p>
 
-[![Version](https://img.shields.io/badge/version-v0.1.0--beta-orange)](https://github.com)
+[![Version](https://img.shields.io/badge/version-v0.1.0--beta-orange)](https://github.com/Me9uru/YeSwap)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey?logo=linux)](https://github.com)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey?logo=linux)](https://github.com/Me9uru/YeSwap)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Me9uru/YeSwap)
 
 <p>
   <a href="#-核心功能">功能亮点</a> ·
@@ -39,6 +39,11 @@
 > 请注意，本程序并非专门的套利工具，也不是万能的无风险低价获取余额的神器。自动购买的饰品在经历 7 天（或数天）的交易冷却期后，其市场表现大部分情况下会趋于您所期望的余额价格。但这并非绝对保证，7 天冷却期结束后的实际折扣比例**有可能上升，也有可能下降**。
 > **如果您的目的是在短时间内快速获取余额，本工具并不适合您。**
 
+> [!IMPORTANT]
+> **本仓库 fork 自 [vexed-wilson/AetherSwap](https://gitee.com/vexed-wilson/AetherSwap)**，遵循
+> [GPL-3.0](LICENSE) 协议；上游版权与署名归原作者所有。当前分支在后端分层、Vue 前端与
+> `uv` 依赖管理上做了重构，代码内标识符（如 `AETHERSWAP_*` 环境变量）保持不变以兼容已有配置。
+
 ---
 
 ## ✨ 核心功能
@@ -56,7 +61,7 @@
 ### 🤖 几乎全自动的倒余额流程
 
 从 **选品 → 下单 → 入库 → 上架 → Steam Guard 确认**，整条链路无需人工守候。  
-桌面环境可通过内嵌浏览器完成登录与 Cookie 提取；无桌面 Linux 服务器会自动降级为手动 Cookie 流程。绑定移动令牌密钥（`identity_secret`）后，商品上架的二次确认也由程序自动签署。
+通过 Playwright 调用后端主机上的 Chrome 完成登录与 Cookie 提取。绑定移动令牌密钥（`identity_secret`）后，商品上架的二次确认也由程序自动签署。
 
 ### 📐 基于数学模型的智能选品与定价
 
@@ -85,27 +90,9 @@
   <sup>▲ 图：饰品历史价格跳动与成交分析</sup>
 </div>
 
-### 🎮 Steam 游戏折扣获取与动态排序
+### 可选后端接口
 
-不仅是饰品倒卖，内置实用的 Steam 商店游戏折扣抓取助手：
-- **实时折扣拉取**：一键批量获取 Steam 平台当前打折游戏的数据。
-- **多维动态排序**：支持按折扣力度、玩家好评率、历史最低价（史低）等维度进行排序与筛选，方便在倒出 Steam 余额后快速寻找高性价比的消费目标。
-
-<div align="center">
-  <img src="./images/3.png" width="700" alt="Steam 游戏折扣面板展示">
-  <br>
-  <sup>▲ 图：折扣雷达——按好评率与降价幅度动态排序的 Steam 游戏列表（图片预留位）</sup>
-</div>
-
-### 🎨 一键生成高质量游戏折扣分享卡片
-
-在游戏折扣面板中，**右键点击**任意游戏卡片，即可一键生成 1920×1080 的高清专属折扣分享卡片：
-
-<div align="center">
-  <img src="./images/steam_deal_card_sample.png" width="700" alt="Steam 折扣分享卡片示例">
-  <br>
-  <sup>▲ 图：赛博朋克 2077 折扣分享卡片示例（右键游戏卡片 → 生成高质量折扣分享卡片）</sup>
-</div>
+赠礼后端接口仍保留，当前 Web 界面不提供入口。账号地区与钱包查询已独立到 `steam/account.py`，不依赖赠礼流程。游戏折扣查询与分享卡片功能已移除。
 
 ---
 
@@ -126,8 +113,8 @@
 | 功能模块 | 描述 |
 |---|---|
 | 🛡️ **Steam 令牌获取与验证** | 内置 Steam 移动令牌（Steam Guard）生成与管理模块，支持提取令牌密钥后在控制台直接生成两步验证码（2FA），无需频繁掏出手机；集成自动确认交易功能，彻底解放双手 |
-| � **智能代理池中转** | 针对 Steam 严格的风控与区域限制，内置强大的代理池管理（支持自定义长效静止 IP 及 Webshare 自动轮换动态 IP），防止同 IP 频繁请求导致的社区封禁或红信 |
-| �🎨 **Web 控制台** | 现代化可视化界面，零代码完成所有配置，实时掌控运行状态 |
+| 🌐 **智能代理池中转** | 针对 Steam 严格的风控与区域限制，内置强大的代理池管理（支持自定义长效静止 IP 及 Webshare 自动轮换动态 IP），防止同 IP 频繁请求导致的社区封禁或红信 |
+| 🎨 **Web 控制台** | 现代化可视化界面，零代码完成所有配置，实时掌控运行状态 |
 | 🔑 **内嵌 Steam 登录** | 直接在面板输入账号，自动完成登录与 Cookie 提取，无需手动抓包 |
 | 🔔 **多渠道消息推送** | 内置 PushPlus 微信推送 + 邮件预警，重要事件即时通知 |
 | 🔒 **一键出厂重置** | 彻底清理代理、令牌、数据库、日志等全部隐私数据，安全迁移无忧 |
@@ -139,7 +126,8 @@
 ### 环境要求
 
 - **Python**: 3.10 或更高版本（[下载](https://www.python.org/downloads/)）
-- **操作系统**: Windows 10/11（推荐）、带桌面环境的 Linux，或无桌面 Linux 服务器
+- **Node.js**: 22 或更高版本（用于构建 Vue 前端）
+- **操作系统**: Windows、macOS 或 Linux
 - **网络**: 需要能够正常访问 Steam 社区
 
 > [!IMPORTANT]
@@ -150,99 +138,94 @@
 **第 1 步：克隆项目**
 
 ```bash
-git clone https://gitee.com/vexed-wilson/AetherSwap.git
-cd AetherSwap
+git clone git@github.com:Me9uru/YeSwap.git
+cd YeSwap
 ```
 
-**第 2 步：安装依赖**
+**第 2 步：使用 uv 安装依赖**
 
 ```bash
-# 二选一：桌面/本地运行
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 安装 uv（已安装可跳过）
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 二选一：无桌面 Linux 服务器（避免安装 pywebview）
-pip install -r requirements-server.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 安装项目的全部运行依赖
+uv sync
 
-# 安装 Playwright 浏览器（Linux 服务器推荐 --with-deps）
-python -m playwright install chromium
-# Linux 服务器：
-python -m playwright install --with-deps chromium
+```
+
+项目通过根目录 `.env` 默认设置 `AETHERSWAP_BROWSER_CHANNEL=chrome`，Playwright 会调用
+宿主机已安装的 Chrome，无需另外下载 Chromium。请确保系统可以正常启动 Chrome。首次配置
+也可以复制 `.env.example` 为 `.env`，再按需修改其中的运行参数。
+
+安装 Vue 前端依赖（首次执行一次即可）：
+
+```bash
+npm --prefix web ci
+```
+
+启动时如果发现前端源码比 `web/dist` 新，或 `web/dist` 尚不存在，`run.py` 会自动执行一次
+`npm --prefix web run build`，因此改完前端源码直接重启程序即可，不需要手动构建。需要手动
+构建时执行 `npm --prefix web run build`。
+
+- 只部署预构建产物、不安装 Node.js 的环境，可设置 `AETHERSWAP_WEB_BUILD=0` 关闭自动构建。
+- 未安装 Node.js、缺少 `web/node_modules` 或构建失败时，只会打印警告，后端仍照常启动，
+  页面继续使用 `web/dist` 中已有的内容。
+
+前端开发时改用 Vite 开发服务器，改源码即时生效，无需构建（`web/vite.config.js` 已把
+`/api` 代理到后端）：
+
+```bash
+uv run python run.py        # 后端，保持运行
+npm --prefix web run dev    # 前端，访问 http://127.0.0.1:5173
 ```
 
 **第 3 步：启动程序**
 
 ```bash
-python run.py
+uv run python run.py
 ```
 
-程序启动后将自动弹出 Web 控制台，按照首页的**「快速开始」**卡片引导完成配置即可。
+启动后按照首页的**「快速开始」**卡片引导完成配置即可。
 
-#### 本地桌面与服务器模式
+#### 本地运行
 
-`python run.py` 会自动判断运行环境：
+`uv run python run.py` 会以前台进程启动 Web 服务：
 
-- 有桌面环境时进入 **desktop 模式**，绑定 `127.0.0.1:28472` 并尝试打开本地窗口/浏览器。
-- 无桌面 Linux 或服务进程中进入 **server 模式**，绑定 `0.0.0.0:28472`，需要用外部浏览器访问。
-- 首次非交互运行时需要先确认免责声明，可在确认已阅读后设置 `AETHERSWAP_AGREE_DISCLAIMER=1`。
+- 默认绑定 `127.0.0.1:28472`，启动后请在浏览器访问该地址。
+- 程序不再创建桌面窗口，也不会自动打开系统浏览器；按 `Ctrl+C` 停止服务。
 
-常用环境变量：
+运行数据默认保存在 `config/`，可设置 `AETHERSWAP_DATA_DIR` 使用独立目录；测试会自动使用临时目录并阻止未模拟的网络连接。
 
-```bash
-# 强制服务器模式
-set AETHERSWAP_MODE=server        # Windows PowerShell 可用 $env:AETHERSWAP_MODE="server"
-export AETHERSWAP_MODE=server     # Linux/macOS
+支持的环境变量：
 
-# 修改监听地址和端口
-set AETHERSWAP_HOST=0.0.0.0
-set AETHERSWAP_PORT=28472
+```dotenv
+# 可选：运行数据目录；未设置时使用仓库根目录下的 config/
+# AETHERSWAP_DATA_DIR=./config
 
-# 非交互服务启动时跳过免责声明输入
-set AETHERSWAP_AGREE_DISCLAIMER=1
+# 后端监听地址和端口
+AETHERSWAP_HOST=127.0.0.1
+AETHERSWAP_PORT=28472
+
+# Playwright 使用宿主 Chrome
+AETHERSWAP_BROWSER_CHANNEL=chrome
+
+# 启动时按需构建前端资源；设为 0 关闭
+# AETHERSWAP_WEB_BUILD=1
+
+# 可选：外部请求代理
+# HTTP_PROXY=http://127.0.0.1:7890
+# HTTPS_PROXY=http://127.0.0.1:7890
+# NO_PROXY=localhost,127.0.0.1
 ```
 
-#### Docker 部署
+设置 `AETHERSWAP_HOST=0.0.0.0` 后，请通过本机局域网 IP 访问，并确保防火墙只向可信网络放行该端口。管理界面涉及账号与交易操作，不应直接暴露到公网。
 
-使用 Docker 可在无桌面 Linux 服务器上一键启动，无需手动安装 Playwright 系统依赖。
-
-**前置条件**：已安装 [Docker](https://docs.docker.com/get-docker/) 与 [Docker Compose](https://docs.docker.com/compose/install/)。
-
-```bash
-# 1. 克隆项目并进入目录
-git clone https://gitee.com/vexed-wilson/AetherSwap.git
-cd AetherSwap
-
-# 2. 准备环境变量（可选，Docker Compose 会自动读取 .env）
-cp .env.example .env
-
-# 3. 确保 config/ 目录存在（首次运行会自动创建数据库等文件）
-mkdir -p config log
-
-# 4. 构建并启动
-docker compose up -d --build
-
-# 5. 查看日志
-docker compose logs -f
-```
-
-启动后通过浏览器访问 `http://<服务器IP>:28472` 打开 Web 控制台。若要修改宿主机访问端口，请在 `.env` 中设置 `AETHERSWAP_HOST_PORT`，容器内监听端口会保持为 `28472`。**强烈建议配置 Nginx 反向代理与访问鉴权，不要将管理面板直接暴露在公网。**
-
-常用命令：
-
-```bash
-docker compose ps          # 查看容器状态
-docker compose stop        # 停止服务
-docker compose down        # 停止并移除容器
-docker compose restart     # 重启服务
-```
-
-`config/` 与 `log/` 目录通过 volume 挂载持久化，容器重建后数据不会丢失。容器内以非 root 用户（uid 1000）运行；若遇到权限问题，请确保宿主机 `config/` 与 `log/` 目录对 uid 1000 可写。
+根目录 `.env` 会在应用初始化时自动加载；系统中已经设置的同名环境变量优先级更高。
 
 如果启动时报 `cannot import name 'Sentinel' from 'typing_extensions'`，说明本机 `typing_extensions` 版本过旧，请执行：
 
 ```bash
-python -m pip install --upgrade typing_extensions
-# 或重新安装项目依赖
-python -m pip install -r requirements.txt
+uv sync --upgrade-package typing-extensions
 ```
 
 
@@ -289,7 +272,8 @@ python -m pip install -r requirements.txt
 - 出售策略的基础库存校验和上架动作会固定保留；定价核心可以在“价格墙定价”和“墙+断层一体定价”之间替换，添加新定价核心时会自动移除互斥模块。
 - 参数可以直接在右侧/下方参数面板编辑，保存时会校验类型、范围和枚举值。
 - 模块数量有限制；重复添加、依赖缺失、顺序错误、互斥冲突都会被阻止。
-- 模拟运行是 dry-run，不会触发 Buff 锁单、付款等待或 Steam 上架。
+- 模拟运行使用样例数据，不会触发 Buff 锁单、付款等待或 Steam 上架。
+- 最高折扣规则与声明式条件会实际计算；最高折扣使用与真实采买相同的判断函数。其他未实现计算的步骤标记为 `sample`，仅展示样例输出，不能视为规则已通过。模拟结果不等于实盘验证。
 
 ### 4. 用户自定义模块
 
@@ -354,7 +338,7 @@ python -m pip install -r requirements.txt
 
 ## ⚙️ 工作原理
 
-AetherSwap 由两条后台 Pipeline 协同驱动：
+YeSwap 由两条后台 Pipeline 协同驱动：
 
 ### 采买 Pipeline
 
@@ -413,25 +397,33 @@ SteamDT 行情接口 → 折扣筛选 → 稳定性分析(CV/R²) → 防呆校�
 ## 🏗 项目结构
 
 ```
-AetherSwap/
-├── app/                   # FastAPI 后端核心
-│   ├── api.py             # FastAPI/ASGI 应用实例与路由注册
-│   ├── main.py            # 桌面 / 服务器运行启动器
-│   ├── runtime_env.py     # 桌面/服务器模式自动判断
-│   ├── strategy_engine.py # 策略中心、模块校验、模拟运行与运行时接入
-│   ├── pipeline_steps.py  # 采买 / 出售 Pipeline 逻辑
-│   ├── database.py        # SQLModel ORM & 数据库操作
-│   ├── routes/            # FastAPI 路由，包含策略中心 API
-│   └── services/          # 后台任务队列与调度
-├── buff/                  # Buff 平台接口封装
-├── steam/                 # Steam API & Playwright 自动化
-├── steamdt/               # SteamDT 行情数据接口
-├── utils/                 # 公共工具（代理、推送、配置等）
-├── web/                   # 前端静态文件（HTML/JS/CSS）
-├── tests/                 # 单元测试套件
-├── run.py                 # 一键启动入口
-├── requirements.txt       # 桌面/本地运行依赖清单
-└── requirements-server.txt # 无桌面服务器依赖清单
+YeSwap/
+├── app/
+│   ├── api.py             # ASGI 组装及后台生命周期
+│   ├── routes/            # HTTP 参数、响应与服务调用
+│   ├── workflows/         # 购入、出售与收货的跨域流程编排
+│   ├── accounts/          # 账号元数据仓储
+│   ├── configuration/     # 配置校验、持久化及凭证访问
+│   ├── purchase/          # 选品、行情、付款、单件/批量订单及结算
+│   ├── strategies/        # 目录、仓储、校验、运行时、表达式及模拟
+│   ├── steam_market/      # 库存、定价、挂单、撤单及市场确认
+│   ├── notifications/     # 消息通知、邮件确认和持仓报告
+│   ├── maintenance/       # 交易记录修复与成交同步
+│   ├── runtime/           # 进程内运行状态
+│   ├── background/        # 收货、在售检查、汇率、报告、账号及保活任务
+│   ├── storage/           # 交易与市场缓存的模型和仓储
+│   └── services/          # 认证、交易、备份、维护及任务队列
+├── steam/                 # Steam 网络适配与账号/钱包查询
+├── buff/                  # Buff 网络适配及请求策略
+├── steamdt/               # SteamDT 行情适配
+├── analysis/              # 分析计算
+├── utils/                 # 无应用层依赖的公共能力
+├── web/src/               # Vue 3 + Element Plus 页面、共享状态与 API 服务
+├── web/tests/             # Vue 组件交互及只读样例预览
+├── tests/                 # 隔离 Python 测试与架构约束
+├── AGENTS.md              # 协作指南、架构边界与验证说明
+├── pyproject.toml / uv.lock
+└── web/package.json / package-lock.json  # 前端运行、构建与测试依赖
 ```
 
 ---
@@ -439,14 +431,22 @@ AetherSwap/
 ## 🧪 运行测试
 
 ```bash
-# 运行全部单元测试
-pytest -q
+# 运行全部单元测试（uv sync 默认包含 dev 依赖组）
+uv run pytest -q
 
 # 运行策略中心专项测试
-pytest tests/test_strategies.py -q
+uv run pytest tests/test_strategies.py -q
 
-# 前端脚本语法检查
-node --check web/js/strategies.js web/js/main.js web/js/utils.js
+# 前端模块依赖与 Vue / Element Plus 交互测试（Node.js 22+）
+npm --prefix web ci
+npm --prefix web test
+npm --prefix web run build
+
+# 可选：只读样例预览，不连接真实交易后端
+npm --prefix web run preview:isolated
+
+# Python 静态检查
+uv run ruff check app buff steam steamdt analysis utils config
 ```
 
 ---
@@ -471,13 +471,12 @@ node --check web/js/strategies.js web/js/main.js web/js/utils.js
 <details>
 <summary><b>Q：启动后控制台窗口打不开？</b></summary>
 
-请确认依赖安装无报错。若为端口占用，可设置 `AETHERSWAP_PORT=其他端口`，或直接使用 `python -m uvicorn app.api:app --host 0.0.0.0 --port 其他端口`。
+请确认依赖安装无报错。若为端口占用，可设置 `AETHERSWAP_PORT=其他端口` 后重新运行程序。
 
 如果报错类似 `cannot import name 'Sentinel' from 'typing_extensions'`，请升级依赖：
 
 ```bash
-python -m pip install --upgrade typing_extensions
-python -m pip install -r requirements.txt
+uv sync --upgrade-package typing-extensions
 ```
 
 </details>
@@ -497,29 +496,6 @@ python -m pip install -r requirements.txt
 </details>
 
 <details>
-<summary><b>Q：如何部署到 Linux 服务器？</b></summary>
-
-AetherSwap 的 FastAPI 架构完整支持无头 Linux 环境。直接运行：
-
-```bash
-pip install -r requirements-server.txt
-python -m playwright install --with-deps chromium
-AETHERSWAP_MODE=server AETHERSWAP_AGREE_DISCLAIMER=1 python run.py
-```
-
-也可以直接运行 Uvicorn：
-
-```bash
-python -m uvicorn app.api:app --host 0.0.0.0 --port 28472
-```
-
-`python run.py` 会自动判断当前环境：有桌面时打开本地窗口，无桌面 Linux/服务器环境则进入服务器模式并监听 `0.0.0.0:28472`。可通过 `AETHERSWAP_MODE=server|desktop`、`AETHERSWAP_HOST`、`AETHERSWAP_PORT` 覆盖默认行为；首次以非交互服务运行时，确认已阅读免责声明后可设置 `AETHERSWAP_AGREE_DISCLAIMER=1`。
-
-再通过外部浏览器访问服务器 IP 即可。**强烈建议配置 Nginx 反向代理与访问鉴权，不要将管理面板直接暴露在公网。**
-
-</details>
-
-<details>
 <summary><b>Q：策略中心里的用户模块可以直接执行代码吗？</b></summary>
 
 不可以。当前版本只允许启用 `module_kind: "declarative"` 的安全声明式模块；它只能读取上下文和前置模块输出，再用白名单操作符做判断。带 `code`、`source`、`entrypoint`、`command` 等字段的外部代码模块只会登记展示，不会执行，也不能加入启用链。
@@ -529,7 +505,7 @@ python -m uvicorn app.api:app --host 0.0.0.0 --port 28472
 <details>
 <summary><b>Q：Buff Cookie 过期了怎么办？</b></summary>
 
-在 Web 控制台的【账号管理】中点击「重新登录」。有桌面环境时系统会拉起内嵌浏览器完成重新授权；无桌面服务器会自动切换为手动 Cookie 输入流程。
+在 Web 控制台的【账号管理】中点击「重新登录」，系统会在运行后端的主机上通过 Playwright 拉起 Chrome 完成重新授权。
 
 </details>
 
@@ -554,7 +530,7 @@ python -m uvicorn app.api:app --host 0.0.0.0 --port 28472
 如果你在**余额倒卖方面有丰富经验**，欢迎加入测试、反馈选品策略或参数调优建议——你的实战经验将直接帮助改进算法。
 
 > 📱 **微信**：`13738064065`  
-> 加好友时请备注 **AetherSwap** 以及**来访目的**，
+> 加好友时请备注 **YeSwap** 以及**来访目的**，
 
 ---
 
@@ -570,7 +546,7 @@ python -m uvicorn app.api:app --host 0.0.0.0 --port 28472
   - [x] 微信支付
   - [ ] 支付宝支付
 - [ ] **移动端 / 响应式 UI 适配**
-- [x] **Docker 一键部署支持**
+- [x] **uv 依赖与环境管理**
 - [ ] **多账号并发任务调度**
 
 ---
@@ -578,9 +554,9 @@ python -m uvicorn app.api:app --host 0.0.0.0 --port 28472
 ## 📄 开发者说明
 
 - **后端栈**：`Python 3.10+` · `FastAPI` · `SQLModel (SQLite)` · `Playwright`
-- **前端栈**：原生 `HTML / JS / CSS`（无框架依赖）
-- **并发机制**：异步 + 多线程融合的后台 Task Queue（`app/services/workers`）
-- **扩展性**：高内聚、低耦合的模块化设计，接入 C5、IGXE 等其他平台仅需添加对应 API 封装层
+- **前端栈**：`Vue 3` · `Element Plus`（中文组件）· `Vite`；支持浅色/深色主题、响应式导航、表格筛选分页与策略可视化编辑。生产入口位于 `web/src/`，构建产物输出到 `web/dist/`。
+- **并发机制**：`app/background/` 定义后台任务，任务队列统一调度；生命周期停止事件中断长等待，ASGI 退出时回收线程池。
+- **模块边界**：路由调用工作流或服务，工作流组合业务域；网络适配层不依赖应用层，业务包不依赖 HTTP 路由。`app/` 根目录只保留应用入口，业务代码和测试直接引用所属子包，不设置旧路径兼容层。架构测试持续检查这些约束。
 
 ---
 
@@ -601,7 +577,7 @@ python -m uvicorn app.api:app --host 0.0.0.0 --port 28472
 
 <div align="center">
 
-如果 AetherSwap 对你有帮助，欢迎点个 **⭐ Star** 支持一下！
+如果 YeSwap 对你有帮助，欢迎点个 **⭐ Star** 支持一下！
 
 Made with ❤️ for the Steam community
 

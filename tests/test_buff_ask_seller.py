@@ -36,64 +36,51 @@ def _requested_ids(calls):
     return [call["payload"]["bill_orders"][0] for call in calls]
 
 
-def test_middle_bill_is_retried_instead_of_being_silently_skipped(monkeypatch):
+@pytest.mark.parametrize(
+    ("responses", "expected_result", "expected_ids"),
+    [
+        # 中间单号瞬时失败后重试：不会被静默跳过，也不会阻止后续单号。
+        pytest.param(
+            [
+                {"code": "OK"},
+                {"code": "TemporaryError", "error": "稍后重试"},
+                {"code": "OK"},
+                {"code": "OK"},
+            ],
+            True,
+            ["bill-1", "bill-2", "bill-2", "bill-3"],
+            id="transient-middle-failure-is-retried",
+        ),
+        # 中间单号永久失败：最后一个单号仍会被提示，但整体结果不能报成功。
+        pytest.param(
+            [
+                {"code": "OK"},
+                {"code": "Rejected"},
+                {"code": "Rejected"},
+                {"code": "Rejected"},
+                {"code": "OK"},
+            ],
+            False,
+            ["bill-1", "bill-2", "bill-2", "bill-2", "bill-3"],
+            id="permanent-middle-failure-is-not-hidden",
+        ),
+    ],
+)
+def test_partial_success_is_not_reported_as_complete_success(
+    monkeypatch,
+    responses,
+    expected_result,
+    expected_ids,
+):
     from buff import buyer as buyer_module
 
-    buyer, calls = _buyer_with_responses(
-        monkeypatch,
-        [
-            {"code": "OK"},
-            {"code": "TemporaryError", "error": "稍后重试"},
-            {"code": "OK"},
-            {"code": "OK"},
-        ],
-    )
-    sleeps = []
-    monkeypatch.setattr(
-        buyer_module,
-        "jittered_sleep",
-        lambda seconds: sleeps.append(seconds),
-    )
-
-    result = buyer.ask_seller_to_send(["bill-1", "bill-2", "bill-3"])
-
-    assert result is True
-    assert _requested_ids(calls) == [
-        "bill-1",
-        "bill-2",
-        "bill-2",
-        "bill-3",
-    ]
-    assert sleeps == [1.5, 3.0, 1.5]
-
-
-def test_partial_success_is_not_reported_as_complete_success(monkeypatch):
-    from buff import buyer as buyer_module
-
-    buyer, calls = _buyer_with_responses(
-        monkeypatch,
-        [
-            {"code": "OK"},
-            {"code": "Rejected"},
-            {"code": "Rejected"},
-            {"code": "Rejected"},
-            {"code": "OK"},
-        ],
-    )
+    buyer, calls = _buyer_with_responses(monkeypatch, responses)
     monkeypatch.setattr(buyer_module, "jittered_sleep", lambda _seconds: None)
 
     result = buyer.ask_seller_to_send(["bill-1", "bill-2", "bill-3"])
 
-    assert result is False
-    # A permanently failing middle bill does not prevent the last bill from
-    # being prompted, but the aggregate result can no longer hide the failure.
-    assert _requested_ids(calls) == [
-        "bill-1",
-        "bill-2",
-        "bill-2",
-        "bill-2",
-        "bill-3",
-    ]
+    assert result is expected_result
+    assert _requested_ids(calls) == expected_ids
 
 
 def test_order_ids_are_normalized_and_deduplicated(monkeypatch):

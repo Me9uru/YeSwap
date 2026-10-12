@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.config_schema import DEFAULTS, merge, validate_and_fill
+from app.configuration.schema import DEFAULTS, merge, validate_and_fill
 
 
 def test_merge_deepcopies_nested_mutable_defaults():

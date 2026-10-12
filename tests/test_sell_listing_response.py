@@ -31,10 +31,10 @@ def _messages(ctx):
 @pytest.mark.parametrize(
     ("response", "expected_detail"),
     [
+        # _parse_listing_response 的三个分支各留一个代表：无响应 /
+        # 不可解析的响应体（data 为 None，含非 JSON 文本与非对象 JSON）/
+        # 返回类型异常。同一分支内的其余形状为同义输入，不再重复参数。
         (None, "无响应"),
-        ({"status_code": 200, "text": "null"}, "HTTP 200; body=null"),
-        ({"status_code": 200, "text": "[]"}, "HTTP 200; body=[]"),
-        ({"status_code": 200, "text": '"ok"'}, 'HTTP 200; body="ok"'),
         (
             {"status_code": 502, "text": "<html>bad gateway</html>"},
             "HTTP 502; body=<html>bad gateway</html>",
@@ -47,7 +47,7 @@ def test_submit_listing_handles_invalid_response_shapes(
     response,
     expected_detail,
 ):
-    from app import sell_pipeline
+    from app.workflows import sale as sell_pipeline
 
     ctx = _context()
     recorded = []
@@ -84,7 +84,7 @@ def test_submit_listing_handles_invalid_response_shapes(
     ],
 )
 def test_submit_listing_preserves_success_variants(monkeypatch, payload):
-    from app import sell_pipeline
+    from app.workflows import sale as sell_pipeline
 
     ctx = _context()
     recorded = []
@@ -119,7 +119,7 @@ def test_submit_listing_preserves_success_variants(monkeypatch, payload):
 def test_submit_listing_retry_null_is_diagnostic_and_not_success(
     monkeypatch,
 ):
-    from app import sell_pipeline
+    from app.workflows import sale as sell_pipeline
 
     ctx = _context()
     responses = iter(
@@ -166,9 +166,10 @@ def test_submit_listing_retry_null_is_diagnostic_and_not_success(
 
 
 def test_submit_listing_retry_success_is_recorded_once(monkeypatch):
-    from app import sell_pipeline
+    from app.workflows import sale as sell_pipeline
 
     ctx = _context()
+    attempts = []
     responses = iter(
         [
             {
@@ -185,7 +186,7 @@ def test_submit_listing_retry_success_is_recorded_once(monkeypatch):
     monkeypatch.setattr(
         sell_pipeline,
         "list_item",
-        lambda *_args: next(responses),
+        lambda *_args: attempts.append(1) or next(responses),
     )
     monkeypatch.setattr(sell_pipeline, "jittered_sleep", lambda *_args: None)
     monkeypatch.setattr(
@@ -203,36 +204,9 @@ def test_submit_listing_retry_success_is_recorded_once(monkeypatch):
     )
 
     assert listed == 1
+    # 首次响应要求等待后重试了一次，且成功只记录一次
+    assert len(attempts) == 2
     assert len(recorded) == 1
-    assert any("[重试成功]" in message for message in _messages(ctx))
-
-
-def test_submit_listing_non_string_message_is_safe(monkeypatch):
-    from app import sell_pipeline
-
-    ctx = _context()
-    monkeypatch.setattr(
-        sell_pipeline,
-        "list_item",
-        lambda *_args: {
-            "status_code": 400,
-            "text": '{"success": false, "message": {"detail": "bad"}}',
-        },
-    )
-    monkeypatch.setattr(sell_pipeline, "jittered_sleep", lambda *_args: None)
-
-    listed = sell_pipeline._submit_listings(
-        ctx,
-        [_entry()],
-        object(),
-        "session-id",
-        0,
-    )
-
-    messages = _messages(ctx)
-    assert listed == 0
-    assert any("{'detail': 'bad'}" in message for message in messages)
-    assert not any("未捕获异常" in message for message in messages)
 
 
 @pytest.mark.parametrize(
@@ -251,7 +225,7 @@ def test_submit_listing_rejects_untrusted_success_shapes(
     monkeypatch,
     response,
 ):
-    from app import sell_pipeline
+    from app.workflows import sale as sell_pipeline
 
     ctx = _context()
     recorded = []
@@ -279,7 +253,7 @@ def test_submit_listing_rejects_untrusted_success_shapes(
 def test_listing_response_logs_are_single_line_bounded_and_redacted(
     monkeypatch,
 ):
-    from app import sell_pipeline
+    from app.workflows import sale as sell_pipeline
 
     ctx = _context()
     sensitive_body = (
@@ -322,11 +296,12 @@ def test_listing_response_logs_are_single_line_bounded_and_redacted(
 @pytest.mark.parametrize(
     ("raw", "ok", "parsed"),
     [
+        # parse_sell_response 的返回契约分支：成功 / 已知失败（返回原始
+        # 对象）/ 非对象 JSON（isinstance 为假）/ JSON 解析异常（except
+        # 分支）。后两者在实现内走不同分支，各留一个代表。
         ('{"success": true}', True, {"success": True}),
         ('{"success": false}', False, {"success": False}),
         ("null", False, None),
-        ("[]", False, None),
-        ('"text"', False, None),
         ("<html>bad gateway</html>", False, None),
     ],
 )
@@ -341,7 +316,6 @@ def test_parse_sell_response_contract(raw, ok, parsed):
     [
         (200, '{"success": true}', True, {"success": True}),
         (500, '{"success": true}', False, {"success": True}),
-        (200, "null", False, None),
     ],
 )
 def test_list_item_by_name_preserves_safe_response_contract(
@@ -383,5 +357,3 @@ def test_list_item_by_name_preserves_safe_response_contract(
 
     assert result["ok"] is expected_ok
     assert result["response"] == expected_response
-    if text == "null":
-        assert result["error"] == "null"

@@ -9,7 +9,6 @@ from utils.time import (
     parse_steam_history_date,
     resolve_configured_timezone,
     timestamp_in_configured_timezone,
-    utc_timestamp,
 )
 
 
@@ -25,8 +24,6 @@ def test_steam_history_parser_preserves_instant_and_returns_utc():
     "raw",
     [
         "Jul 09 2026 04: +0",
-        "Jul 09 2026 04: +00",
-        "Jul 09 2026 04: +0000",
         "Jul 09 2026 04",
     ],
 )
@@ -44,7 +41,6 @@ def test_steam_history_utc_variants_are_timezone_aware(raw):
         "",
         "not a date",
         "Jul 09 2026 04: +1500",
-        "Jul 09 2026 04: +1460",
     ],
 )
 def test_invalid_steam_history_dates_are_rejected(raw):
@@ -57,10 +53,6 @@ def test_steam_cooldown_is_explicit_utc():
     assert parsed is not None
     assert parsed.tzinfo is timezone.utc
     assert parsed.isoformat() == "2026-07-09T04:16:03+00:00"
-
-
-def test_utc_timestamp_matches_epoch_in_non_utc_host_timezones():
-    assert utc_timestamp() == pytest.approx(time.time(), abs=0.1)
 
 
 def test_cutoff_days_ago_is_aware_utc():

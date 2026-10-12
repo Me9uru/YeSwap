@@ -4,14 +4,14 @@ from typing import Optional
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
 router = APIRouter()
-WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
+WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web" / "dist"
 
 
 def _web_file_response(path: Path) -> FileResponse:
     headers = {}
     if path.suffix.lower() in {".html", ".js"}:
-        # Local Chromium/WebView profiles survive application updates. Force
-        # executable UI assets to revalidate instead of mixing old and new JS.
+        # Browser caches survive application updates. Force executable UI assets
+        # to revalidate instead of mixing old and new JavaScript.
         headers["Cache-Control"] = "no-cache"
     return FileResponse(path, headers=headers)
 
@@ -31,7 +31,10 @@ def index():
     f = WEB_DIR / "index.html"
     if f.exists():
         return _web_file_response(f)
-    return {"app": "aetherswap", "ui": "web/index.html not found"}
+    return {
+        "app": "aetherswap",
+        "ui": "web/dist/index.html not found; run npm --prefix web run build",
+    }
 @router.get("/{path:path}")
 def static_or_index(path: str):
     f = _safe_web_file(path)

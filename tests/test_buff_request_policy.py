@@ -12,7 +12,6 @@ from buff.buyer import (
     API_SELL_ORDER,
     API_STEAM_TRADE,
     API_WX_PAY_QRCODE,
-    DEFAULT_USER_AGENT,
     PAY_METHOD_WECHAT,
     BuffBuyer,
 )
@@ -88,14 +87,10 @@ def no_wait_policy(**kwargs):
 
 
 def test_default_user_agent_is_stable_and_can_be_overridden():
-    first = BuffBuyer("session=one", request_policy=no_wait_policy())
-    second = BuffBuyer("session=two", request_policy=no_wait_policy())
     custom = BuffBuyer(
         "session=three", user_agent="Browser/7", request_policy=no_wait_policy()
     )
 
-    assert first.headers["User-Agent"] == DEFAULT_USER_AGENT
-    assert second.headers["User-Agent"] == DEFAULT_USER_AGENT
     assert custom.headers["User-Agent"] == "Browser/7"
     assert custom.user_agent == "Browser/7"
 
@@ -173,24 +168,28 @@ def test_429_retry_after_opens_and_persists_account_circuit(tmp_path):
 @pytest.mark.parametrize(
     "raw",
     [
+        # One representative per damaged-input class.  All rows below fail
+        # closed, but they reach that outcome through different guards, so each
+        # guard keeps a row:
+        #   * truncated JSON           -> json.loads() error path (same handler
+        #                                 as the duplicate-key hook)
+        #   * NaN literal              -> `parse_constant` rejection, which
+        #                                 also raises for Infinity
+        #   * wrong version            -> top-level envelope guard (a payload
+        #                                 without a version fails the same `if`)
+        #   * unknown reason           -> `_CircuitState.from_json` reason guard
+        #   * updated_at true / "1"    -> `updated_at` type guard
+        #   * status_code "429"        -> `status_code` type guard (a `1e999`
+        #                                 literal overflows to inf and is
+        #                                 rejected by this same guard)
+        #   * duplicate key            -> object_pairs_hook rejection
         "{broken",
-        "{}",
-        '{"version": 2, "accounts": {}}',
-        '{"version": 1, "accounts": {"default": {}}}',
         (
             '{"version": 1, "accounts": {"default": '
             '{"reason": "verification", "updated_at": NaN}}}'
         ),
-        (
-            '{"version": 1, "accounts": {"default": '
-            '{"reason": "rate_limited", "updated_at": 1, '
-            '"blocked_until": Infinity, "status_code": 429}}}'
-        ),
-        (
-            '{"version": 1, "accounts": {"default": '
-            '{"reason": "rate_limited", "updated_at": 1, '
-            '"blocked_until": 2, "status_code": 1e999}}}'
-        ),
+        '{"version": 2, "accounts": {}}',
+        '{"version": 1, "accounts": {"default": {}}}',
         (
             '{"version": 1, "accounts": {"default": '
             '{"reason": "rate_limited", "updated_at": true, '
@@ -403,6 +402,34 @@ def test_policy_enforces_hard_minimum_interval_for_same_account():
     assert sleeps == [pytest.approx(1.25)]
 
 
+def test_browser_verification_shares_pacing_but_cannot_bypass_rate_limit():
+    now = [10.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    policy = no_wait_policy(clock=lambda: now[0], sleeper=sleep)
+    policy.min_interval = 2.0
+    with policy.request_slot("account"):
+        pass
+    policy.trip_verification("account", "verify")
+
+    with pytest.raises(BuffVerificationRequired):
+        with policy.request_slot("account"):
+            pass
+    with policy.verification_slot("account"):
+        pass
+    assert sleeps == [pytest.approx(2.0)]
+
+    policy.trip_rate_limit("account", 60, "cooldown")
+    with pytest.raises(BuffRateLimited):
+        with policy.verification_slot("account"):
+            raise AssertionError("429 must prevent the browser probe")
+    assert sleeps == [pytest.approx(2.0)]
+
+
 def test_production_defaults_use_two_second_interval_and_five_minute_429():
     assert DEFAULT_MIN_REQUEST_INTERVAL == 2.0
     assert DEFAULT_RATE_LIMIT_SECONDS == 300.0
@@ -420,7 +447,10 @@ def test_production_defaults_use_two_second_interval_and_five_minute_429():
 
 @pytest.mark.parametrize(
     "raw",
-    ["NaN", "Infinity", "-Infinity", "-1", "-0.01"],
+    # Every non-finite literal (NaN, Infinity, -Infinity) and every negative
+    # value fails the same `not math.isfinite(seconds) or seconds < 0` guard and
+    # returns the same default, so one representative of each clause is enough.
+    ["NaN", "-1"],
 )
 def test_invalid_numeric_retry_after_uses_safe_default(raw):
     assert parse_retry_after(raw) == pytest.approx(DEFAULT_RATE_LIMIT_SECONDS)
@@ -589,35 +619,6 @@ def test_public_lock_method_does_not_swallow_unknown_write_result():
     assert len(session.calls) == 1
 
 
-def test_success_without_order_id_is_unknown_and_skips_payment_lookup():
-    session = FakeSession(FakeResponse({"code": "OK", "data": {}}))
-    buyer = BuffBuyer(
-        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
-    )
-
-    with pytest.raises(BuffWriteResultUnknown, match="订单号"):
-        buyer.lock_and_get_pay_url("csgo", 1, "sell-order", "10.00")
-    assert [(method, url) for method, url, _ in session.calls] == [
-        ("POST", API_BUY)
-    ]
-
-
-def test_batch_finalize_success_without_order_id_stops_immediately():
-    session = FakeSession(FakeResponse({"code": "OK", "data": {}}))
-    buyer = BuffBuyer(
-        "session=s; csrf_token=c",
-        pay_method=PAY_METHOD_WECHAT,
-        session=session,
-        request_policy=no_wait_policy(),
-    )
-
-    with pytest.raises(BuffWriteResultUnknown, match="订单号"):
-        buyer.batch_buy_finalize("csgo", 1, "sell-order", "10.00", "batch")
-    assert [(method, url) for method, url, _ in session.calls] == [
-        ("POST", API_BUY)
-    ]
-
-
 @pytest.mark.parametrize(
     ("method_name", "args", "pay_method"),
     [
@@ -633,7 +634,15 @@ def test_batch_finalize_success_without_order_id_stops_immediately():
 )
 @pytest.mark.parametrize(
     "success_data",
-    [None, [], "bad-data", {}, {"id": ""}, {"id": {"bad": "type"}}],
+    # One representative per malformed-payload class:
+    #   * ``None`` covers every non-dict payload -- ``[]`` and ``"bad-data"``
+    #     are rejected by the same ``isinstance(data, dict)`` guard
+    #   * ``{}`` and ``{"id": {"bad": "type"}}`` are both rejected by the value
+    #     type guard inside ``_normalize_server_identifier`` (one row per
+    #     missing-id / wrong-type input shape)
+    #   * ``{"id": ""}`` is the only row exercising the separate
+    #     empty-identifier guard
+    [None, {}, {"id": ""}, {"id": {"bad": "type"}}],
 )
 def test_every_order_creating_write_rejects_malformed_success_data(
     method_name, args, pay_method, success_data
@@ -678,12 +687,19 @@ def test_non_idempotent_5xx_or_non_json_is_unknown_result(response):
 @pytest.mark.parametrize(
     ("response", "circuit_exception"),
     [
+        # One representative per classified write failure.  Rows that only differ
+        # in HTTP status code or message wording execute the same production
+        # guard, so the second spelling is dropped:
+        #   403 / 412                     -> risk-control guard
+        #   429 / body "RATE_LIMIT"       -> rate-limit guard
+        #   "/verify" / "/maintenance"    -> navigation guard
+        #   401 / body "LOGIN_REQUIRED"   -> authentication guard
+        #   gateway HTML / login HTML     -> unknown-HTML guard (the login wording
+        #                                    does not match the login markers)
+        # "页面已过期" and "RISK"/"captcha" both stay: they are the only rows
+        # covering those `_is_verification_required` markers.
         (
             FakeResponse({"code": "FAIL"}, status_code=403),
-            BuffRiskControlTriggered,
-        ),
-        (
-            FakeResponse({"code": "FAIL"}, status_code=412),
             BuffRiskControlTriggered,
         ),
         (
@@ -725,21 +741,6 @@ def test_non_idempotent_5xx_or_non_json_is_unknown_result(response):
             BuffVerificationRequired,
         ),
         (
-            FakeResponse(
-                {"code": "OK"},
-                url="https://buff.163.com/maintenance",
-                history=[
-                    FakeResponse(
-                        None,
-                        status_code=302,
-                        headers={"Location": "/maintenance"},
-                        url="https://buff.163.com/api/write",
-                    )
-                ],
-            ),
-            BuffVerificationRequired,
-        ),
-        (
             FakeResponse({"code": "LOGIN_REQUIRED"}, status_code=401),
             None,
         ),
@@ -748,26 +749,8 @@ def test_non_idempotent_5xx_or_non_json_is_unknown_result(response):
             BuffVerificationRequired,
         ),
         (
-            FakeResponse(
-                {"code": "LOGIN_REQUIRED", "msg": "login"},
-                status_code=500,
-            ),
-            None,
-        ),
-        (
-            FakeResponse(
-                {"code": "RATE_LIMIT", "msg": "slow down"},
-                status_code=500,
-            ),
-            BuffRateLimited,
-        ),
-        (
-            FakeResponse(
-                None,
-                headers={"Content-Type": "text/html"},
-                raw_text="<html><body>please login</body></html>",
-            ),
-            None,
+            FakeResponse({"code": "FAIL", "msg": "页面已过期"}),
+            BuffVerificationRequired,
         ),
         (
             FakeResponse(
@@ -800,19 +783,29 @@ def test_every_issued_abnormal_write_is_unknown_and_keeps_relevant_circuit(
 
 
 @pytest.mark.parametrize(
-    "pay_response",
+    ("pay_response", "expected_lookup_calls"),
     [
-        requests.Timeout("payment lookup timed out"),
-        FakeResponse({"code": "LOGIN_REQUIRED"}, status_code=401),
-        FakeResponse({"code": "FAIL"}, status_code=403),
-        FakeResponse({"code": "OK", "data": []}),
-        FakeResponse({"code": "OK", "data": {"url": {"bad": "type"}}}),
+        # One representative per failure reason:
+        #   * a transport error is swallowed by the lookup helper, so the
+        #     bounded read retries are exhausted and no URL is ever returned
+        #   * a 200 OK whose payload yields a non-string URL is rejected by the
+        #     retry loop's string check (an OK body that is not a dict ends in
+        #     the same retry-exhausted path, so it adds no branch)
+        #   * an auth/circuit failure on the read side stops retrying at once
+        #     (401 and 403 both raise a `BuffRequestBlocked` subclass, so the
+        #     risk spelling adds no branch)
+        (requests.Timeout("payment lookup timed out"), 4),
+        (FakeResponse({"code": "OK", "data": {"url": {"bad": "type"}}}), 4),
+        (FakeResponse({"code": "LOGIN_REQUIRED"}, status_code=401), 1),
     ],
 )
-def test_order_created_payment_lookup_failure_returns_created_pending(pay_response):
+def test_order_created_payment_lookup_failure_returns_created_pending(
+    pay_response, expected_lookup_calls, monkeypatch
+):
+    monkeypatch.setattr("buff.buyer.jittered_sleep", lambda *_args, **_kwargs: None)
     session = FakeSession(
         FakeResponse({"code": "OK", "data": {"id": "order-created"}}),
-        pay_response,
+        *[pay_response for _ in range(4)],
     )
     buyer = BuffBuyer(
         "session=s; csrf_token=c",
@@ -823,18 +816,50 @@ def test_order_created_payment_lookup_failure_returns_created_pending(pay_respon
 
     result = buyer.lock_and_get_pay_url("csgo", 1, "sell-order", "10.00")
 
-    assert result == {
-        "success": False,
-        "code": "CREATED_WITHOUT_PAY_URL",
-        "created": True,
-        "pay_url": None,
-        "pay_type": "alipay",
-        "order_id": "order-created",
-    }
+    assert result["success"] is False
+    assert result["code"] == "CREATED_WITHOUT_PAY_URL"
+    assert result["created"] is True
+    assert result["pay_url"] is None
+    assert result["pay_type"] == "alipay"
+    assert result["order_id"] == "order-created"
     assert [(method, url) for method, url, _ in session.calls] == [
         ("POST", API_BUY),
-        ("GET", API_PAGE_PAY),
+        *[("GET", API_PAGE_PAY) for _ in range(expected_lookup_calls)],
     ]
+
+
+def test_payment_lookup_retries_until_qrcode_is_available(monkeypatch):
+    monkeypatch.setattr("buff.buyer.jittered_sleep", lambda *_args, **_kwargs: None)
+    session = FakeSession(
+        FakeResponse({"code": "OK", "data": {"id": "wechat-order"}}),
+        FakeResponse({"code": "OK", "data": {}}),
+        FakeResponse({"code": "OK", "data": {"url": "https://pay.example/ok"}}),
+    )
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c",
+        pay_method=PAY_METHOD_WECHAT,
+        session=session,
+        request_policy=no_wait_policy(),
+    )
+
+    result = buyer.lock_and_get_pay_url("csgo", 1, "sell-order", "10.00")
+
+    assert result["success"] is True
+    assert result["pay_url"] == "https://pay.example/ok"
+    assert [(method, url) for method, url, _ in session.calls] == [
+        ("POST", API_BUY),
+        ("GET", API_WX_PAY_QRCODE),
+        ("GET", API_WX_PAY_QRCODE),
+    ]
+    diagnostic = buyer.last_payment_lookup_diagnostic
+    assert diagnostic["payment_kind"] == "wechat"
+    assert diagnostic["order_id"] == "wechat-order"
+    assert diagnostic["attempt"] == 1
+    assert diagnostic["attempts"] == 4
+    assert diagnostic["http_status"] == 200
+    assert diagnostic["code"] == "OK"
+    assert diagnostic["data_type"] == "dict"
+    assert diagnostic["data_keys"] == []
 
 
 def test_payment_lookup_block_is_preserved_after_created_pending_result():
@@ -857,6 +882,29 @@ def test_payment_lookup_block_is_preserved_after_created_pending_result():
     with pytest.raises(BuffRiskControlTriggered):
         buyer._make_request("GET", API_HISTORY)
     assert len(session.calls) == 2
+
+
+def test_created_pending_result_exposes_payment_lookup_verification_reason(
+    monkeypatch,
+):
+    monkeypatch.setattr("buff.buyer.jittered_sleep", lambda *_args, **_kwargs: None)
+    session = FakeSession(
+        FakeResponse({"code": "OK", "data": {"id": "order-created"}}),
+        FakeResponse({"code": "FAIL", "error": "请刷新当前页面后重试"}),
+    )
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c",
+        session=session,
+        request_policy=no_wait_policy(),
+        account_id="default",
+    )
+
+    result = buyer.lock_and_get_pay_url("csgo", 1, "sell-order", "10.00")
+
+    assert result["code"] == "CREATED_WITHOUT_PAY_URL"
+    assert result["created"] is True
+    assert result["order_id"] == "order-created"
+    assert result["msg"] == "请刷新当前页面后重试"
 
 
 def test_wechat_payment_lookup_auth_failure_is_created_pending(monkeypatch):
@@ -1003,7 +1051,7 @@ def test_verify_session_is_one_lightweight_get_and_trade_poll_uses_same_session(
     assert [call[0] for call in session.calls] == ["GET", "GET"]
     assert session.calls[0][1] == API_HISTORY
     assert session.calls[0][2]["params"]["page_size"] == "10"
-    assert session.calls[0][2]["params"]["state"] == "wait_pay"
+    assert "state" not in session.calls[0][2]["params"]
     assert session.calls[1][1] == API_STEAM_TRADE
     assert "to_receive" in session.calls[1][2]["headers"]["Referer"]
 

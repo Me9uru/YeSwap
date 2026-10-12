@@ -3,8 +3,9 @@ import time
 
 import pytest
 
-from app import pipeline
+from app.workflows import purchase as pipeline
 from app.services import buff_checkout_guard as guard
+from app.runtime.pipeline_control import clear_shutdown_pending
 
 
 class _State:
@@ -39,7 +40,7 @@ def _isolated_guard(monkeypatch, tmp_path):
     with pipeline._pipeline_start_lock:
         pipeline._pipeline_thread = None
         pipeline._pipeline_maintenance_reason = ""
-        pipeline._shutdown_pending = False
+        clear_shutdown_pending()
     yield
     with pipeline._pipeline_start_lock:
         thread = pipeline._pipeline_thread
@@ -48,7 +49,7 @@ def _isolated_guard(monkeypatch, tmp_path):
     with pipeline._pipeline_start_lock:
         pipeline._pipeline_thread = None
         pipeline._pipeline_maintenance_reason = ""
-        pipeline._shutdown_pending = False
+        clear_shutdown_pending()
 
 
 def test_unresolved_checkout_blocks_restart_until_explicit_ack(monkeypatch):
@@ -129,7 +130,8 @@ def test_pipeline_start_does_not_clear_unverified_auth_flags(monkeypatch, status
 
 
 def test_durable_guard_freezes_credentials_and_background_reads(monkeypatch):
-    from app.services import buff_auth, workers
+    from app.services import buff_auth
+    from app.background import safety as workers
 
     guard.begin_checkout("batch", 123, quantity=2)
     guard.update_checkout(stage="batch_created_pending", batch_id="batch-1")
@@ -163,8 +165,8 @@ def test_running_pipeline_freezes_manual_credential_replacement(monkeypatch):
 
 
 def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
-    from app import pipeline_steps as steps
-    from app.routes import config as config_routes
+    from app.purchase import checkout
+    from app.services import backup as config_routes
     from app.services import buff_auth
 
     state = _State()
@@ -246,7 +248,7 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
 
     def run_checkout():
         try:
-            steps.lock_and_confirm_payment(
+            checkout.lock_and_confirm_payment(
                 BuffClient(),
                 item,
                 cfg,
@@ -262,13 +264,13 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
     assert identity_read.wait(timeout=2)
 
     import_result = {}
+    from app.routes import config as config_route
+    from app.routes.config import ImportFullBody
 
     def run_import():
         import_result.update(
-            config_routes.api_import_full(
-                config_routes.ImportFullBody(
-                    transactions={"purchases": [], "sales": []}
-                )
+            config_route.api_import_full(
+                ImportFullBody(transactions={"purchases": [], "sales": []})
             )
         )
 
@@ -283,10 +285,8 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
 
     release_identity.set()
     checkout_thread.join(timeout=2)
-    retry_result = config_routes.api_import_full(
-        config_routes.ImportFullBody(
-            transactions={"purchases": [], "sales": []}
-        )
+    retry_result = config_route.api_import_full(
+        ImportFullBody(transactions={"purchases": [], "sales": []})
     )
 
     assert errors == []

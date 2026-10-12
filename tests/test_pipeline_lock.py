@@ -2,7 +2,7 @@ import threading
 
 
 def test_start_pipeline_rejects_duplicate_running_pipeline(monkeypatch):
-    from app import pipeline
+    from app.workflows import purchase as pipeline
 
     started = threading.Event()
     release = threading.Event()
@@ -31,7 +31,7 @@ def test_start_pipeline_rejects_duplicate_running_pipeline(monkeypatch):
 
 
 def test_start_pipeline_allows_restart_after_thread_exits(monkeypatch):
-    from app import pipeline
+    from app.workflows import purchase as pipeline
 
     calls = []
 

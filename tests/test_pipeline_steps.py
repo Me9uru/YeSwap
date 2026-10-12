@@ -7,11 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.pipeline_steps import (
-    _adjust_ref_price_for_daily_high,
-    _compute_sell_pressure_from_orders,
-    filter_iflow_rows,
-)
+from app.purchase.market import _adjust_ref_price_for_daily_high, _compute_sell_pressure_from_orders
+from app.purchase.selection import filter_iflow_rows
 
 
 def _行(name="Test Item", min_price="10.00", platform="https://buff.163.com/goods/12345", **kw):
@@ -39,28 +36,10 @@ _基础配置 = {
 
 # ── 卖压计算测试 ──────────────────────────────────────────────────────────
 
-def test_卖压_空订单返回None():
+def test_卖压_空订单或零日销量返回None():
+    # 同一条守卫的两半：没有挂单，或日销量为零时都无法计算压力比
     assert _compute_sell_pressure_from_orders([], 100) is None
-
-
-def test_卖压_日销量为零返回None():
-    orders = [(5.0, 10), (5.1, 5)]
-    assert _compute_sell_pressure_from_orders(orders, 0) is None
-
-
-def test_卖压_大量挂单卖压高():
-    # 200件挂单，日销10，压力比 = 20，稳妥超过阈值
-    orders = [(5.0, 200)]
-    pressure = _compute_sell_pressure_from_orders(orders, 10, n_orders=1)
-    assert pressure is not None
-    assert pressure > 1.0
-
-
-def test_卖压_少量挂单卖压低():
-    orders = [(5.0, 1), (5.1, 1)]
-    pressure = _compute_sell_pressure_from_orders(orders, 1000, n_orders=5)
-    assert pressure is not None
-    assert pressure < 1.0
+    assert _compute_sell_pressure_from_orders([(5.0, 10), (5.1, 5)], 0) is None
 
 
 def test_卖压_价格断层识别():
@@ -146,7 +125,7 @@ def test_daily_high_adjustment_uses_trimmed_average(monkeypatch):
         def fetch_history(self, market_hash_name, app_id=730, return_currency=False):
             return {"history": history, "currency": "CNY"}
 
-    monkeypatch.setattr("app.pipeline_steps.SteamClient", DummySteamClient)
+    monkeypatch.setattr("app.purchase.market.SteamClient", DummySteamClient)
 
     adjusted = _adjust_ref_price_for_daily_high(
         "Test Item",
@@ -166,7 +145,7 @@ def test_daily_high_adjustment_never_raises_reference_price(monkeypatch):
         def fetch_history(self, market_hash_name, app_id=730, return_currency=False):
             return {"history": history, "currency": "CNY"}
 
-    monkeypatch.setattr("app.pipeline_steps.SteamClient", DummySteamClient)
+    monkeypatch.setattr("app.purchase.market.SteamClient", DummySteamClient)
 
     adjusted = _adjust_ref_price_for_daily_high(
         "Test Item",

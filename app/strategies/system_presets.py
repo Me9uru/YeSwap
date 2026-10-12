@@ -1,0 +1,93 @@
+"""系统购入和出售策略预设。"""
+
+from typing import Any, Dict, List
+
+
+SYSTEM_STRATEGIES: List[Dict[str, Any]] = [
+    {
+        "id": "system.buy.default",
+        "name": "系统默认购入策略",
+        "strategy_type": "buy",
+        "origin": "system",
+        "readonly": True,
+        "description": "复刻当前自动购入流程：候选过滤、实时价格、折扣、卖压、稳定性和安全采购保护。",
+        "steps": [
+            {"module_id": "buy.steamdt_top_n", "enabled": True, "params": {}},
+            {"module_id": "buy.exclude_keywords", "enabled": True, "params": {}},
+            {"module_id": "buy.basic_candidate_filter", "enabled": True, "params": {}},
+            {"module_id": "buy.buff_realtime_price", "enabled": True, "params": {}},
+            {"module_id": "buy.steam_sell_depth", "enabled": True, "params": {}},
+            {"module_id": "guard.sell_pressure", "enabled": True, "params": {}},
+            {"module_id": "guard.max_discount", "enabled": True, "params": {}},
+            {"module_id": "guard.history_data_window", "enabled": True, "params": {}},
+            {"module_id": "guard.volatility_cv", "enabled": True, "params": {}},
+            {"module_id": "guard.trend_quality", "enabled": True, "params": {}},
+            {"module_id": "guard.price_position", "enabled": True, "params": {}},
+            {"module_id": "guard.purchase_hard_cap", "enabled": True, "params": {}},
+            {"module_id": "guard.purchase_liquidity_cap", "enabled": True, "params": {}},
+            {"module_id": "guard.low_price_purchase_guard", "enabled": True, "params": {}},
+            {"module_id": "guard.held_same_item_guard", "enabled": True, "params": {}},
+            {"module_id": "guard.target_balance", "enabled": True, "params": {}},
+            {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
+        ],
+    },
+    {
+        "id": "system.sell.immediate",
+        "name": "系统出售策略1：立即上架",
+        "strategy_type": "sell",
+        "origin": "system",
+        "readonly": True,
+        "description": "可出售后按 Steam 卖单墙+断层智能定价并上架。",
+        "steps": [
+            {"module_id": "sell.sellable_inventory_filter", "enabled": True, "params": {}},
+            {"module_id": "guard.max_listings_per_item", "enabled": True, "params": {}},
+            {"module_id": "pricing.steam_wall_price", "enabled": True, "params": {}},
+            {"module_id": "pricing.price_offset", "enabled": True, "params": {}},
+            {"module_id": "action.steam_list", "enabled": True, "params": {}},
+        ],
+    },
+    {
+        "id": "system.sell.trend",
+        "name": "系统出售策略2：趋势等待",
+        "strategy_type": "sell",
+        "origin": "system",
+        "readonly": True,
+        "description": "策略1基础上，近 N 天上涨时等待。",
+        "steps": [
+            {"module_id": "sell.sellable_inventory_filter", "enabled": True, "params": {}},
+            {"module_id": "guard.max_listings_per_item", "enabled": True, "params": {}},
+            {"module_id": "pricing.steam_wall_price", "enabled": True, "params": {}},
+            {"module_id": "pricing.price_offset", "enabled": True, "params": {}},
+            {"module_id": "guard.rising_trend_wait", "enabled": True, "params": {}},
+            {"module_id": "action.steam_list", "enabled": True, "params": {}},
+        ],
+    },
+    {
+        "id": "system.sell.profit_guard",
+        "name": "系统出售策略3：利润保护",
+        "strategy_type": "sell",
+        "origin": "system",
+        "readonly": True,
+        "description": "策略2基础上，避免以明显更差的价格低价售出。",
+        "steps": [
+            {"module_id": "sell.sellable_inventory_filter", "enabled": True, "params": {}},
+            {"module_id": "guard.max_listings_per_item", "enabled": True, "params": {}},
+            {"module_id": "pricing.steam_wall_price", "enabled": True, "params": {}},
+            {"module_id": "pricing.price_offset", "enabled": True, "params": {}},
+            {"module_id": "guard.rising_trend_wait", "enabled": True, "params": {}},
+            {"module_id": "guard.profit_ratio", "enabled": True, "params": {}},
+            {"module_id": "action.steam_list", "enabled": True, "params": {}},
+        ],
+    },
+    {
+        "id": "system.sell.pause",
+        "name": "系统出售策略4：暂停自动出售",
+        "strategy_type": "sell",
+        "origin": "system",
+        "readonly": True,
+        "description": "自动出售阶段跳过，保留手动出售。",
+        "steps": [
+            {"module_id": "action.pause_auto_sell", "enabled": True, "params": {}},
+        ],
+    },
+]

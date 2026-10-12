@@ -1,4 +1,4 @@
-from app.notify import compute_holdings_stats
+from app.notifications.service import compute_holdings_stats
 
 
 def test_total_market_change_only_counts_items_with_both_market_prices():

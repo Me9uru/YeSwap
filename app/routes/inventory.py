@@ -1,13 +1,10 @@
 """Inventory routes."""
 from fastapi import APIRouter
-from app.state import get_inventory, is_steam_background_allowed, log, set_inventory
-from app.inventory_cs2 import scan_cs2_inventory
-from app.pipeline import run_sell_phase_on_inventory_update
-from app.config_loader import get_steam_credentials, load_app_config_validated
-from app.shared_market import get_steam_smart_price_cny, batch_fetch_prices
+from app.runtime.state import get_inventory, is_steam_background_allowed, log, set_inventory
+from app.steam_market.inventory import scan_cs2_inventory
+from app.workflows.sale import run_sell_phase_on_inventory_update
+from app.steam_market.pricing import batch_fetch_prices
 router = APIRouter()
-def _get_steam_smart_price_cny(session, market_hash_name: str, app_id: int = 730):
-    return get_steam_smart_price_cny(session, market_hash_name, app_id=app_id)
 def _enrich_inventory_with_steam_prices(items: list, old_items: list) -> None:
     """Fill lowest_price on inventory items using shared batch_fetch_prices."""
     old_price_by_name: dict = {}
@@ -108,7 +105,7 @@ def api_market_prices():
     """
     if not is_steam_background_allowed():
         return {"prices": {}, "error": "Steam 后台请求不可用"}
-    from app.state import get_purchases
+    from app.runtime.state import get_purchases
     inv_items = get_inventory() or []
     inv_names = {
         (it.get("market_hash_name") or it.get("name") or "").strip()

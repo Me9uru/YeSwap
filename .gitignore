@@ -26,8 +26,28 @@ config/steam_deals_checkpoint.json.tmp
 # 日志
 log/
 
+# uv 环境与配置备份
+.venv/
+backups/
+
+# 本地启动配置
+.env
+
 # Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+
+# 编辑器与操作系统
+.idea/
+.vscode/
+.DS_Store
+
+# Frontend development dependencies
+node_modules/
+
+# Vite development cache (production bundle under web/dist is distributed)
+web/node_modules/

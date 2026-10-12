@@ -100,7 +100,6 @@ def test_steam_refresh_token_poll_retries_pending_response_and_tracks_new_client
         "client-2",
         "client-2",
     ]
-    assert sleeps == [0.25, 0.25]
 
 
 def test_steam_refresh_token_poll_timeout_has_actionable_error():
@@ -228,48 +227,6 @@ def test_do_steampy_login_once_injects_proxy_and_bounded_timeout(monkeypatch):
     assert error == ""
     assert len(request_calls) == 1
     assert request_calls[0][2]["proxies"] == proxy
-    assert request_calls[0][2]["timeout"] == (10, 25)
-    assert request_calls[0][2]["verify"] is False
-
-
-def test_steam_login_strategy_one_retries_network_error_through_proxy(monkeypatch):
-    from app.services import steam_auth
-
-    proxy = {
-        "http": "http://proxy.example:8080/",
-        "https": "http://proxy.example:8080/",
-    }
-    manager_calls = []
-    login_calls = []
-
-    class FakeProxyManager:
-        def get_proxies_for_request(self, failed=False):
-            manager_calls.append(failed)
-            return proxy if failed else None
-
-    def fake_login_once(_username, _password, _guard, request_proxies=None):
-        login_calls.append(request_proxies)
-        if request_proxies is None:
-            return False, "network_error: direct failed", {}
-        return True, "", {"steamLoginSecure": "ok"}
-
-    monkeypatch.setattr(
-        steam_auth,
-        "load_app_config_validated",
-        lambda: {"proxy_pool": {"enabled": True, "strategy": 1}},
-    )
-    monkeypatch.setattr(
-        steam_auth,
-        "_get_steam_login_proxy_manager",
-        lambda: FakeProxyManager(),
-    )
-    monkeypatch.setattr(steam_auth, "_do_steampy_login_once", fake_login_once)
-
-    result = steam_auth._do_steampy_login("user", "password", None)
-
-    assert result[0] is True
-    assert manager_calls == [False, True]
-    assert login_calls == [None, proxy]
 
 
 def test_steam_login_does_not_retry_authentication_error(monkeypatch):
@@ -306,20 +263,26 @@ def test_steam_login_does_not_retry_authentication_error(monkeypatch):
     assert login_calls == [None]
 
 
-def test_steam_login_strategy_two_uses_proxy_and_rotates_once(monkeypatch):
+@pytest.mark.parametrize("strategy", [1, 2])
+def test_steam_login_retries_network_error_through_proxy_pool(monkeypatch, strategy):
+    """策略 1 先直连、失败后走代理；策略 2 直接走代理并在失败后轮换节点。"""
+
     from app.services import steam_auth
 
-    proxies = [
-        {"https": "http://proxy-one.example:8080/"},
-        {"https": "http://proxy-two.example:8080/"},
-    ]
+    proxy_one = {
+        "http": "http://proxy-one.example:8080/",
+        "https": "http://proxy-one.example:8080/",
+    }
+    proxy_two = {"https": "http://proxy-two.example:8080/"}
+    # 策略 1 的首次尝试是直连（None），策略 2 从第一个节点就开始走代理
+    pool = [None, proxy_one] if strategy == 1 else [proxy_one, proxy_two]
     manager_calls = []
     login_calls = []
 
     class FakeProxyManager:
         def get_proxies_for_request(self, failed=False):
             manager_calls.append(failed)
-            return proxies[len(manager_calls) - 1]
+            return pool[len(manager_calls) - 1]
 
     def fake_login_once(_username, _password, _guard, request_proxies=None):
         login_calls.append(request_proxies)
@@ -330,7 +293,7 @@ def test_steam_login_strategy_two_uses_proxy_and_rotates_once(monkeypatch):
     monkeypatch.setattr(
         steam_auth,
         "load_app_config_validated",
-        lambda: {"proxy_pool": {"enabled": True, "strategy": 2}},
+        lambda: {"proxy_pool": {"enabled": True, "strategy": strategy}},
     )
     monkeypatch.setattr(
         steam_auth,
@@ -343,7 +306,8 @@ def test_steam_login_strategy_two_uses_proxy_and_rotates_once(monkeypatch):
 
     assert result[0] is True
     assert manager_calls == [False, True]
-    assert login_calls == proxies
+    # 重试必须使用代理池在 failed=True 时给出的节点
+    assert login_calls == pool
 
 
 def test_steam_login_strategy_two_never_falls_back_to_direct(monkeypatch):

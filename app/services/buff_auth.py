@@ -1,18 +1,24 @@
 """BUFF browser authentication and opt-in session keep-alive."""
+from utils.paths import DATA_DIR
 
 import json
 import threading
 import time
-from pathlib import Path
 from typing import Any, Callable, Optional
 
-from app.config_loader import get_buff_credentials, update_buff_creds
-from app.state import (
+from app.configuration.repository import get_buff_credentials, update_buff_creds
+from app.runtime.state import (
     get_pending_payment,
     get_status,
     log,
     set_buff_auth_expired,
     set_buff_verification_required,
+)
+from app.runtime_env import get_browser_channel
+from app.services.buff_browser_probe import (
+    _response_has_challenge,
+    detect_buff_challenge,
+    read_buff_browser_user_agent,
 )
 
 
@@ -27,33 +33,6 @@ BUFF_BROWSER_LAUNCH_ARGS = [
     "--no-proxy-server",
 ]
 
-_CHALLENGE_MARKERS = (
-    "captcha",
-    "geetest",
-    "challenge-platform",
-    "cf-chl-",
-    "verify you are human",
-    "访问验证",
-    "安全验证",
-    "请完成验证",
-    "拖动滑块",
-    "行为验证",
-    "访问过于频繁",
-    "请求过于频繁",
-    "risk_control",
-)
-_VISIBLE_CHALLENGE_MARKERS = (
-    "challenge-platform",
-    "cf-chl-",
-    "verify you are human",
-    "访问验证",
-    "安全验证",
-    "请完成验证",
-    "拖动滑块",
-    "行为验证",
-    "访问过于频繁",
-    "请求过于频繁",
-)
 _CHECKOUT_CREDENTIAL_FREEZE_STEPS = frozenset(
     {
         "CHECKOUT_PENDING",
@@ -82,7 +61,7 @@ def buff_credential_replacement_block_reason() -> str:
     """
 
     try:
-        from app.pipeline import is_shutdown_pending
+        from app.runtime.pipeline_control import is_shutdown_pending
         from app.services.buff_checkout_guard import get_unresolved_checkout
 
         if is_shutdown_pending():
@@ -149,85 +128,18 @@ def _evaluate_browser_verification_with_global_pacing(
     page: Any,
     script: str,
 ) -> Any:
-    """Run the browser API probe in the global account pacing slot.
-
-    Interactive verification must be able to probe through an existing
-    risk/verification circuit, while an unexpired rate-limit remains a hard
-    stop.  BuffRequestPolicy currently exposes no public circuit-bypass slot,
-    so this mirrors its account-lock/pacing section without clearing the
-    circuit.
-    """
-
-    from buff import BuffRateLimited, BuffRequestBlocked
+    """Run the browser API probe in the policy's verification slot."""
 
     policy, account_key = _global_policy_and_account_key()
-    account_lock_factory = getattr(policy, "_account_lock", None)
-    last_started = getattr(policy, "_last_started", None)
-    clock = getattr(policy, "_clock", None)
-    sleeper = getattr(policy, "_sleep", None)
-    if not (
-        callable(account_lock_factory)
-        and isinstance(last_started, dict)
-        and callable(clock)
-        and callable(sleeper)
-    ):
-        request_slot = getattr(policy, "request_slot", None)
-        if callable(request_slot):
-            with request_slot(account_key):
-                return page.evaluate(script)
-        # Compatibility with minimal policy doubles: production policies always
-        # expose a request slot, while circuit synchronization below remains
-        # independently testable with lightweight recorders.
-        return page.evaluate(script)
-
-    account_lock = account_lock_factory(account_key)
-    with account_lock:
-        try:
-            policy.raise_if_blocked(account_key)
-        except BuffRateLimited:
-            raise
-        except BuffRequestBlocked:
-            pass
-
-        previous = last_started.get(account_key)
-        if previous is not None:
-            remaining = policy.min_interval - (clock() - previous)
-            if remaining > 0:
-                sleeper(remaining)
-        last_started[account_key] = clock()
+    with policy.verification_slot(account_key):
         return page.evaluate(script)
 
 
 def _clear_account_circuit_preserving_pacing(policy: Any, account_key: str) -> None:
     """Clear one circuit without erasing the last global request timestamp."""
-
-    clear = getattr(policy, "clear", None)
-    if callable(clear):
-        # Current BuffRequestPolicy.clear() preserves pacing and also resets a
-        # fail-closed invalid-file marker after successful browser verification.
-        clear(account_key)
-        return
-
-    guard = getattr(policy, "_guard", None)
-    circuits = getattr(policy, "_circuits", None)
-    save_locked = getattr(policy, "_save_locked", None)
-    if guard is not None and isinstance(circuits, dict) and callable(save_locked):
-        with guard:
-            circuits.pop(account_key, None)
-            save_locked()
-        return
-
-    # Compatibility fallback for policy doubles and older implementations.
-    last_started = getattr(policy, "_last_started", None)
-    sentinel = object()
-    previous = (
-        last_started.get(account_key, sentinel)
-        if isinstance(last_started, dict)
-        else sentinel
-    )
+    # BuffRequestPolicy.clear() preserves pacing and resets an invalid-file
+    # marker only after explicit browser verification.
     policy.clear(account_key)
-    if isinstance(last_started, dict) and previous is not sentinel:
-        last_started[account_key] = previous
 
 
 def _trip_browser_verification(
@@ -292,52 +204,6 @@ def clear_buff_request_policy_after_verification(
         return False
 
 
-def read_buff_browser_user_agent(page: Any) -> str:
-    """Read the exact UA exposed by the browser page, if available."""
-
-    try:
-        value = page.evaluate("() => navigator.userAgent")
-    except Exception:
-        return ""
-    return str(value or "").strip()
-
-
-def detect_buff_challenge(page: Any) -> str:
-    """Return a human-readable reason when the loaded page is a risk challenge."""
-
-    location_pieces = []
-    try:
-        location_pieces.append(str(getattr(page, "url", "") or ""))
-    except Exception:
-        pass
-    try:
-        location_pieces.append(str(page.title() or ""))
-    except Exception:
-        pass
-    location = "\n".join(location_pieces).lower()
-    marker = next((item for item in _CHALLENGE_MARKERS if item in location), "")
-    if marker:
-        return f"BUFF 页面要求安全验证（命中标记: {marker}）"
-
-    body_text = ""
-    try:
-        body_text = str(page.inner_text("body", timeout=2000) or "")
-    except Exception:
-        try:
-            body_text = str(page.content() or "")[:200_000]
-        except Exception:
-            body_text = ""
-    marker = next((item for item in _VISIBLE_CHALLENGE_MARKERS if item in body_text.lower()), "")
-    if marker:
-        return f"BUFF 页面要求安全验证（命中标记: {marker}）"
-    return ""
-
-
-def _response_has_challenge(text: str) -> bool:
-    lowered = (text or "").lower()
-    return any(marker in lowered for marker in _CHALLENGE_MARKERS)
-
-
 def verify_buff_browser_session(page: Any) -> tuple[bool, str, str]:
     """Verify authentication with one small read-only request in the browser.
 
@@ -355,7 +221,9 @@ def verify_buff_browser_session(page: Any) -> tuple[bool, str, str]:
 
     script = """
         async () => {
-          const url = "/api/market/buy_order/history?game=csgo&page_num=1&page_size=10&state=wait_pay";
+          // Keep this probe independent of BUFF's changing order-state enum.
+          // page_size=10 is currently accepted while page_size=1 is rejected.
+          const url = "/api/market/buy_order/history?game=csgo&page_num=1&page_size=10";
           const controller = new AbortController();
           const timeoutId = setTimeout(() => controller.abort(), 15000);
           try {
@@ -370,12 +238,27 @@ def verify_buff_browser_session(page: Any) -> tuple[bool, str, str]:
               }
             });
             const body = await response.text();
+            let parsed = null;
+            try {
+              const value = JSON.parse(body);
+              if (value && typeof value === "object") {
+                parsed = {
+                  code: value.code || "",
+                  error: value.error || "",
+                  msg: value.msg || "",
+                  message: value.message || ""
+                };
+              }
+            } catch (_) {}
             return {
               status: response.status,
               url: response.url,
               contentType: response.headers.get("content-type") || "",
               retryAfter: response.headers.get("retry-after") || "",
-              body: body.slice(0, 8192)
+              payload: parsed,
+              body: body.slice(0, 8192),
+              bodyLength: body.length,
+              bodyPrefixCodes: Array.from(body.slice(0, 8)).map(ch => ch.charCodeAt(0))
             };
           } finally {
             clearTimeout(timeoutId);
@@ -433,10 +316,27 @@ def verify_buff_browser_session(page: Any) -> tuple[bool, str, str]:
     if status_code == 401 or any(marker in response_url for marker in ("/login", "/account/login")):
         return False, "expired", "BUFF 登录状态已失效"
 
-    try:
-        payload = json.loads(response_body)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False, "error", f"BUFF 在线验证未返回 JSON（HTTP {status_code or '未知'}）"
+    payload = result.get("payload")
+    if not isinstance(payload, dict):
+        try:
+            payload = json.loads(response_body)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+    if not isinstance(payload, dict):
+        content_type = str(result.get("contentType") or "unknown").split(";", 1)[0]
+        response_path = response_url.split("?", 1)[0]
+        body_length = int(result.get("bodyLength", len(response_body)) or 0)
+        prefix_codes = result.get("bodyPrefixCodes")
+        if not isinstance(prefix_codes, list):
+            prefix_codes = []
+        return (
+            False,
+            "error",
+            "BUFF 在线验证未返回 JSON"
+            f"（HTTP {status_code or '未知'}，Content-Type {content_type}，"
+            f"长度 {body_length}，前缀编码 {prefix_codes[:8]}，"
+            f"路径 {response_path or '未知'}）",
+        )
     code = str(payload.get("code") or "")
     message = str(payload.get("error") or payload.get("msg") or "")
     combined = f"{code} {message}".lower()
@@ -489,13 +389,22 @@ def verify_manual_buff_credentials(
         user_agent=(user_agent or "").strip() or None,
         request_policy=get_global_policy(),
         account_id=BUFF_ACCOUNT_ID,
+        # BUFF occasionally accepts the TLS connection promptly but delays the
+        # authenticated history response.  This is a one-off, read-only
+        # credential probe; give it more headroom without relaxing the normal
+        # trading client's 10-second request timeout.
+        request_timeout=30.0,
     )
     try:
         if buyer.verify_session():
             if on_verified_cookies is not None:
                 on_verified_cookies(buyer.export_cookie_string())
             return True, "ok", "BUFF 手工 Cookie 在线验证通过"
-        return False, "invalid", "BUFF 手工 Cookie 在线验证未通过"
+        result = getattr(buyer, "last_session_verification_result", {}) or {}
+        code = str(result.get("code") or "未知")[:80]
+        reason = str(result.get("error") or "")[:160]
+        detail = f"（BUFF 返回 {code}" + (f"：{reason}" if reason else "") + "）"
+        return False, "invalid", f"BUFF 手工 Cookie 在线验证未通过{detail}"
     except BuffAuthExpired:
         return False, "expired", "BUFF 手工 Cookie 已失效或未登录"
     except BuffRateLimited as exc:
@@ -589,7 +498,7 @@ def try_buff_auto_relogin() -> tuple[bool, str, str]:
 
 def _notify_buff_expired() -> None:
     try:
-        from app.notify import notify_manual_intervention_required
+        from app.notifications.service import notify_manual_intervention_required
 
         notify_manual_intervention_required(
             "Buff",
@@ -633,7 +542,7 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
         )
         return False, circuit_status, circuit_message
 
-    profile_dir = Path(__file__).resolve().parent.parent.parent / "config" / "playwright_buff"
+    profile_dir = DATA_DIR / "playwright_buff"
     profile_dir.mkdir(parents=True, exist_ok=True)
     log("buff_relogin: 开始验证并刷新浏览器会话", "info", category="buff")
 
@@ -646,6 +555,9 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
                 "headless": True,
                 "args": BUFF_BROWSER_LAUNCH_ARGS,
             }
+            browser_channel = get_browser_channel()
+            if browser_channel:
+                launch_options["channel"] = browser_channel
             saved_user_agent = str(cred.get("user_agent") or "").strip()
             if saved_user_agent:
                 launch_options["user_agent"] = saved_user_agent

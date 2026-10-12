@@ -3,11 +3,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import strategy_engine as se
+from app.strategies import validation as strategy_validation
 
 
 def test_strategy_import_enabled_string_false_stays_disabled():
-    strategy = se.normalize_strategy({
+    strategy = strategy_validation.normalize_strategy({
         "name": "Disabled string step",
         "strategy_type": "sell",
         "steps": [

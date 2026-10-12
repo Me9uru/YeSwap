@@ -1,34 +1,14 @@
+from utils.paths import DATA_DIR
 import copy
 import json
-import os
-import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Optional
-_CONFIG_DIR = Path(__file__).resolve().parent
+_CONFIG_DIR = DATA_DIR
 _CREDENTIALS_FILE = _CONFIG_DIR / "credentials.json"
 _cache: dict = {}
 _credentials_lock = threading.RLock()
-def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON durably without exposing readers to a truncated file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=str(path.parent),
-    )
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(temp_path, path)
-    finally:
-        try:
-            temp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+from utils.json_store import atomic_write_json as _atomic_write_json
 def _load() -> dict:
     global _cache
     with _credentials_lock:

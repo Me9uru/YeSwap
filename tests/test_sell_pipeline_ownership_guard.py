@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from app.sell_pipeline import _build_listing_plan, _find_buy_record
+from app.workflows.sale import _build_listing_plan, _find_buy_record
 
 
 ITEM_NAME = "AK-47 | Redline (Field-Tested)"
@@ -79,7 +79,7 @@ def test_listing_plan_never_prices_or_lists_same_name_personal_item():
     )
 
     with patch(
-        "app.sell_pipeline.get_sell_orders_cny",
+        "app.workflows.sale.get_sell_orders_cny",
         side_effect=AssertionError("unsafe item reached Steam pricing"),
     ):
         result = _build_listing_plan(

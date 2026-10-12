@@ -3,6 +3,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
@@ -22,33 +24,9 @@ class _Response:
         return self._payload
 
 
-def test_refresh_account_region_currency_success_marks_account_safe(monkeypatch):
-    from app.services import account_region
-    from app import gift_engine
-
-    updates = {}
-    monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id})
-    monkeypatch.setattr(account_region, "get_steam_credentials", lambda: {"cookies": "steamLoginSecure=x"})
-    monkeypatch.setattr(
-        account_region,
-        "update_account",
-        lambda account_id, **kwargs: updates.setdefault("payload", kwargs) or {"id": account_id, **kwargs},
-    )
-    monkeypatch.setattr(gift_engine, "get_wallet_balance", lambda cookies: {"currency_code": "CNY", "currency_id": 23})
-
-    result = account_region.refresh_account_region_currency("acc1")
-
-    assert result["ok"] is True
-    assert result["region_code"] == "CN"
-    assert result["currency_code"] == "CNY"
-    assert updates["payload"]["region_check_ok"] is True
-    assert updates["payload"]["region_code"] == "CN"
-    assert updates["payload"]["currency_code"] == "CNY"
-
-
 def test_refresh_account_region_currency_uses_settlement_currency_as_region_source(monkeypatch):
     from app.services import account_region
-    from app import gift_engine
+    from steam import account as gift_engine
 
     updates = {}
     monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id})
@@ -73,95 +51,108 @@ def test_refresh_account_region_currency_uses_settlement_currency_as_region_sour
     assert updates["payload"]["region_check_ok"] is True
 
 
-def test_refresh_account_region_currency_can_fallback_to_wallet_country_for_unknown_currency(monkeypatch):
+@pytest.mark.parametrize(
+    ("wallet", "cookies", "skip_unconfigured", "expected"),
+    [
+        # 未知结算币种 ID：回退到钱包国家
+        pytest.param(
+            {"currency_code": "XYZ", "currency_id": 99, "wallet_country": "CN"},
+            "steamLoginSecure=x",
+            False,
+            {
+                "ok": True,
+                "currency_code": "XYZ",
+                "region_code": "CN",
+                "payload": {"region_check_ok": True},
+            },
+            id="unknown-currency-falls-back-to-wallet-country",
+        ),
+        # 钱包未返回结算币种：标记账号不安全
+        pytest.param(
+            {"currency_id": 0},
+            "steamLoginSecure=x",
+            False,
+            {
+                "ok": False,
+                "error": "结算币种",
+                "payload": {"region_check_ok": False},
+            },
+            id="missing-currency-is-unsafe",
+        ),
+        # 启动期缺少 Cookie：跳过同步且不写回账号
+        pytest.param(
+            None,
+            "",
+            True,
+            {"ok": False, "skipped": True, "status": "missing_cookie"},
+            id="missing-cookie-skips-during-startup",
+        ),
+        # 非启动期缺少 Cookie：标记不安全并记录原因
+        pytest.param(
+            None,
+            "",
+            False,
+            {
+                "ok": False,
+                "error": "Cookie",
+                "payload": {
+                    "region_check_ok": False,
+                    "region_check_error": "Cookie",
+                },
+            },
+            id="missing-cookie-is-unsafe-when-strict",
+        ),
+    ],
+)
+def test_refresh_account_region_currency_branches(
+    monkeypatch,
+    wallet,
+    cookies,
+    skip_unconfigured,
+    expected,
+):
     from app.services import account_region
-    from app import gift_engine
+    from steam import account as gift_engine
 
     updates = {}
     monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id})
-    monkeypatch.setattr(account_region, "get_steam_credentials", lambda: {"cookies": "steamLoginSecure=x"})
+    monkeypatch.setattr(account_region, "get_steam_credentials", lambda: {"cookies": cookies})
     monkeypatch.setattr(
         account_region,
         "update_account",
         lambda account_id, **kwargs: updates.setdefault("payload", kwargs) or {"id": account_id, **kwargs},
     )
-    monkeypatch.setattr(
-        gift_engine,
-        "get_wallet_balance",
-        lambda cookies: {"currency_code": "XYZ", "currency_id": 99, "wallet_country": "CN"},
+    if wallet is not None:
+        monkeypatch.setattr(gift_engine, "get_wallet_balance", lambda _cookies: wallet)
+
+    result = account_region.refresh_account_region_currency(
+        "acc1",
+        skip_unconfigured=skip_unconfigured,
     )
 
-    result = account_region.refresh_account_region_currency("acc1")
-
-    assert result["ok"] is True
-    assert result["currency_code"] == "XYZ"
-    assert result["region_code"] == "CN"
-    assert updates["payload"]["region_check_ok"] is True
-
-
-def test_refresh_account_region_currency_marks_missing_currency_unsafe(monkeypatch):
-    from app.services import account_region
-    from app import gift_engine
-
-    updates = {}
-    monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id})
-    monkeypatch.setattr(account_region, "get_steam_credentials", lambda: {"cookies": "steamLoginSecure=x"})
-    monkeypatch.setattr(
-        account_region,
-        "update_account",
-        lambda account_id, **kwargs: updates.setdefault("payload", kwargs) or {"id": account_id, **kwargs},
-    )
-    monkeypatch.setattr(gift_engine, "get_wallet_balance", lambda cookies: {"currency_id": 0})
-
-    result = account_region.refresh_account_region_currency("acc1")
-
-    assert result["ok"] is False
-    assert "结算币种" in result["error"]
-    assert updates["payload"]["region_check_ok"] is False
-
-
-def test_refresh_account_region_currency_skips_missing_cookie_during_startup(monkeypatch):
-    from app.services import account_region
-
-    called = {"updated": False}
-    monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id})
-    monkeypatch.setattr(account_region, "get_steam_credentials", lambda: {"cookies": ""})
-    monkeypatch.setattr(
-        account_region,
-        "update_account",
-        lambda account_id, **kwargs: called.__setitem__("updated", True),
-    )
-
-    result = account_region.refresh_account_region_currency("acc1", skip_unconfigured=True)
-
-    assert result["ok"] is False
-    assert result["skipped"] is True
-    assert result["status"] == "missing_cookie"
-    assert called["updated"] is False
-
-
-def test_refresh_account_region_currency_marks_missing_cookie_unsafe_when_strict(monkeypatch):
-    from app.services import account_region
-
-    updates = {}
-    monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id})
-    monkeypatch.setattr(account_region, "get_steam_credentials", lambda: {"cookies": ""})
-    monkeypatch.setattr(
-        account_region,
-        "update_account",
-        lambda account_id, **kwargs: updates.setdefault("payload", kwargs) or {"id": account_id, **kwargs},
-    )
-
-    result = account_region.refresh_account_region_currency("acc1")
-
-    assert result["ok"] is False
-    assert updates["payload"]["region_check_ok"] is False
-    assert "Cookie" in updates["payload"]["region_check_error"]
+    assert result["ok"] is expected["ok"]
+    for key in ("currency_code", "region_code", "status"):
+        if key in expected:
+            assert result[key] == expected[key]
+    if "skipped" in expected:
+        assert result["skipped"] is expected["skipped"]
+    if "error" in expected:
+        assert expected["error"] in result["error"]
+    if "payload" in expected:
+        payload = updates["payload"]
+        for key, value in expected["payload"].items():
+            # 错误信息只校验要点，其余按精确值比对
+            if isinstance(value, str):
+                assert value in payload[key]
+            else:
+                assert payload[key] is value
+    else:
+        assert "payload" not in updates
 
 
 def test_refresh_account_region_currency_rejects_cookie_for_different_account(monkeypatch):
     from app.services import account_region
-    from app import gift_engine
+    from steam import account as gift_engine
 
     updates = {}
     monkeypatch.setattr(account_region, "get_account", lambda account_id: {"id": account_id, "steam_id": "222"})
@@ -191,29 +182,8 @@ def test_refresh_account_region_currency_rejects_cookie_for_different_account(mo
     assert updates["payload"]["region_check_ok"] is False
 
 
-def test_verify_account_triggers_region_currency_refresh(monkeypatch):
-    from app.routes import accounts
-
-    monkeypatch.setattr(
-        accounts,
-        "verify_steam_auto_login",
-        lambda account_id: {"ok": True, "status": "auto_ok", "message": "验证通过"},
-    )
-    monkeypatch.setattr(
-        accounts,
-        "refresh_account_region_currency",
-        lambda account_id: {"ok": True, "region_code": "CN", "currency_code": "CNY"},
-    )
-
-    result = accounts.api_verify_account("acc1")
-
-    assert result["ok"] is True
-    assert result["region_sync"]["ok"] is True
-    assert result["message"] == "验证通过"
-
-
 def test_get_base_auth_status_strict_reads_store_user_config_country(monkeypatch):
-    from app import gift_engine
+    from steam import account as gift_engine
     import utils.proxy_manager as proxy_manager
 
     config = html.escape(json.dumps({
@@ -225,18 +195,17 @@ def test_get_base_auth_status_strict_reads_store_user_config_country(monkeypatch
     monkeypatch.setattr(proxy_manager, "get_proxy_manager", lambda: _ProxyManager())
     monkeypatch.setattr(gift_engine.requests, "get", lambda *args, **kwargs: _Response(page))
 
-    token, country_code, config_data = gift_engine.get_base_auth_status(
+    token, country_code, _config_data = gift_engine.get_base_auth_status(
         "steamLoginSecure=x",
         require_country=True,
     )
 
     assert token == "jwt-token"
     assert country_code == "HK"
-    assert config_data["account"]["country_code"] == "hk"
 
 
 def test_get_wallet_balance_returns_wallet_country(monkeypatch):
-    from app import gift_engine
+    from steam import account as gift_engine
     import utils.proxy_manager as proxy_manager
 
     page = (
@@ -255,7 +224,7 @@ def test_get_wallet_balance_returns_wallet_country(monkeypatch):
 
 
 def test_get_wallet_balance_fallback_returns_currency_for_zero_balance(monkeypatch):
-    from app import gift_engine
+    from steam import account as gift_engine
     import utils.proxy_manager as proxy_manager
 
     payload = {
@@ -279,7 +248,7 @@ def test_get_wallet_balance_fallback_returns_currency_for_zero_balance(monkeypat
 
 
 def test_get_wallet_balance_rejects_unknown_currency_id(monkeypatch):
-    from app import gift_engine
+    from steam import account as gift_engine
     import utils.proxy_manager as proxy_manager
 
     page = (

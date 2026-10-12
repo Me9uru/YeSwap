@@ -33,7 +33,6 @@ def _iqr_bounds(prices: List[float]) -> Tuple[float, float]:
     if not prices or len(prices) < 3:
         return float("-inf"), float("inf")
     sorted_prices = sorted(prices)
-    n = len(sorted_prices)
     q1 = _percentile(sorted_prices, 25)
     q3 = _percentile(sorted_prices, 75)
     iqr = q3 - q1

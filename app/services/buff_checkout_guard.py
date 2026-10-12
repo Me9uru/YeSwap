@@ -7,6 +7,7 @@ permit another purchase write with an unknown prior outcome.
 """
 
 from __future__ import annotations
+from utils.paths import DATA_DIR
 
 import copy
 import errno
@@ -23,8 +24,7 @@ from typing import Any, Iterator, Optional
 
 
 _GUARD_PATH = (
-    Path(__file__).resolve().parent.parent.parent
-    / "config"
+    DATA_DIR
     / "buff_checkout_guard.json"
 )
 _guard_lock = threading.RLock()

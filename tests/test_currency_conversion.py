@@ -6,19 +6,33 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-def test_detect_currency_supports_steam_symbol_prefixes():
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # 多字符 "$" 前缀必须先于裸 "$" 的 USD 兜底匹配，否则会被误判为美元。
+        ("US$ 100", "USD"),
+        ("HK$ 100", "HKD"),
+        ("R$ 100", "BRL"),
+        ("CL$ 100", "CLP"),
+        # 人民币符号与代码同义，同样不能落入美元兜底。
+        ("￥ 100", "CNY"),
+        ("CN￥ 100", "CNY"),
+        ("RMB 100", "CNY"),
+        # 其余币种的符号与代码各覆盖一个代表写法。
+        ("₹ 100", "INR"),
+        ("₽ 100", "RUB"),
+        ("€ 100", "EUR"),
+        ("₺ 100", "TRY"),
+        ("JP¥ 100", "JPY"),
+        ("INR 100", "INR"),
+        ("$ 100", "USD"),
+        ("", None),
+    ],
+)
+def test_detect_currency_reads_steam_symbols_and_codes(text, expected):
     from steam.client import detect_currency
 
-    assert detect_currency("\u20b9 100") == "INR"
-    assert detect_currency("\u20bd 100") == "RUB"
-    assert detect_currency("\u20ac 100") == "EUR"
-    assert detect_currency("\u20ba 100") == "TRY"
-    assert detect_currency("HK$ 100") == "HKD"
-    assert detect_currency("R$ 100") == "BRL"
-    assert detect_currency("CL$ 100") == "CLP"
-    assert detect_currency("US$ 100") == "USD"
-    assert detect_currency("CNY 100") == "CNY"
-    assert detect_currency("\uffe5 100") == "CNY"
+    assert detect_currency(text) == expected
 
 
 def test_apply_currency_uses_rate_map_for_non_usd_prices():

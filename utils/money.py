@@ -1,12 +1,30 @@
+from utils.paths import DATA_DIR
 import json
 import math
 import time
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 USD_TO_CNY_DEFAULT = 7.2
 CURRENCY_CNY = "CNY"
 CURRENCY_USD = "USD"
-_EXCHANGE_RATE_FILE = Path(__file__).resolve().parent.parent / "config" / "exchange_rate.json"
+STEAM_MARKET_GROSS_ESTIMATE_FACTOR = 1.15
+
+
+def estimated_steam_gross_from_proceeds(proceeds: float) -> float:
+    """Estimate the buyer-paid price from seller proceeds in the same currency."""
+    return proceeds * STEAM_MARKET_GROSS_ESTIMATE_FACTOR
+
+
+def estimated_steam_proceeds_from_gross(gross_price: float) -> float:
+    """Estimate seller proceeds from a buyer-paid price in the same currency."""
+    return gross_price / STEAM_MARKET_GROSS_ESTIMATE_FACTOR
+
+
+def estimated_purchase_discount_ratio(cost: float, steam_gross_price: float) -> float:
+    """Compare a CNY purchase cost with an estimated CNY Steam payout."""
+    return (cost / steam_gross_price) * STEAM_MARKET_GROSS_ESTIMATE_FACTOR
+
+
+_EXCHANGE_RATE_FILE = DATA_DIR / "exchange_rate.json"
 _EXCHANGE_RATE_TTL = 300
 _exchange_rate_cache: Tuple[float, Dict[str, float]] = (0.0, {})
 g_rgWalletInfo = {

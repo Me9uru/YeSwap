@@ -1,11 +1,10 @@
 """代理池配置与测试路由."""
-import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import List
 from fastapi import APIRouter
 from pydantic import BaseModel
-from app.config_loader import load_app_config_validated, save_app_config_validated
+from app.configuration.repository import load_app_config_validated, save_app_config_validated
 router = APIRouter()
 class ProxyEntry(BaseModel):
     host: str
@@ -35,7 +34,7 @@ def api_save_proxy_config(body: ProxyPoolBody):
         from utils.proxy_manager import get_proxy_manager
         pm = get_proxy_manager()
         pm.reload()
-        from app.state import log
+        from app.runtime.state import log
         log(
             f"[proxy] 配置已保存并重载: enabled={new_pool.get('enabled')} "
             f"strategy={new_pool.get('strategy')} "
@@ -43,7 +42,7 @@ def api_save_proxy_config(body: ProxyPoolBody):
             "info",
             category="proxy",
         )
-    except Exception as e:
+    except Exception:
         pass  
     return {"ok": True}
 @router.post("/api/proxy/test")

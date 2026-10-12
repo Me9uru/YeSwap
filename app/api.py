@@ -1,38 +1,42 @@
 """
 FastAPI application entry point.
-All routes are registered via `app.routes`, and all background
-workers are started from `app.services.workers`.  This file is
-intentionally kept minimal.
+All routes are registered via `app.routes`, and background jobs are imported
+from their owning modules. This file is intentionally kept minimal.
 """
-import sys
+
+import asyncio
 import threading
-import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks
-from app.database import init_db, migrate_from_json
-init_db()
-migrate_from_json()
-from app.services.workers import (
-    exchange_rate_worker,
-    holdings_report_worker,
-    listing_check_worker,
-    receive_worker,
-    sync_account_region_worker,
-    session_keepalive_worker,
-)
-from app.services.task_queue import get_task_queue
-from app.state import log, request_stop
-from app.runtime_env import get_runtime_profile
+from fastapi import FastAPI
+from app.storage.connection import init_db
+from app.storage.transactions import migrate_from_json
+from app.background.accounts import sync_account_region_worker
+from app.background.exchange_rates import exchange_rate_worker
+from app.background.keepalive import session_keepalive_worker
+from app.background.listings import listing_check_worker
+from app.background.receive import receive_worker
+from app.background.reports import holdings_report_worker
+from app.services.task_queue import get_task_queue, shutdown_task_queue
+from app.services.lifecycle import stop_event
+from app.services.auth_session import configure_pipeline_resume
+from app.runtime.state import log, request_stop
+from app.workflows.purchase import start_pipeline
+
 _bg_started = False
 _bg_lock = threading.Lock()
+
+
 def _start_background_workers() -> None:
     global _bg_started
     with _bg_lock:
         if _bg_started:
             return
+        stop_event.clear()
         _bg_started = True
     q = get_task_queue()
-    q.submit(sync_account_region_worker, name="sync_account_region", max_retries=3, retry_base_delay=10.0)
+    q.submit(
+        sync_account_region_worker, name="sync_account_region", max_retries=3, retry_base_delay=10.0
+    )
     for fn in (
         receive_worker,
         listing_check_worker,
@@ -41,37 +45,33 @@ def _start_background_workers() -> None:
         session_keepalive_worker,
     ):
         q.submit(fn, name=fn.__name__, max_retries=3, retry_base_delay=5.0)
+
+
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
-    _start_background_workers()
-    yield
-app = FastAPI(title="aetherswap", lifespan=_lifespan)
-@app.get("/api/runtime")
-def api_runtime():
-    return {"ok": True, "runtime": get_runtime_profile().as_dict()}
+    global _bg_started
+    from steam.market_orders import configure_nameid_cache
+    from app.storage.market_cache import db_get_item_nameid, db_set_item_nameid
+    from utils.proxy_manager import configure_proxy_runtime
+    from app.configuration.repository import load_app_config_validated
 
-@app.get("/api/tasks")
-def api_tasks(limit: int = 50):
-    q = get_task_queue()
-    return {"tasks": q.list_tasks(limit=limit), "active": q.active_count()}
-@app.get("/api/tasks/{task_id}")
-def api_task_detail(task_id: str):
-    q = get_task_queue()
-    info = q.get_task(task_id)
-    if info is None:
-        return {"ok": False, "error": "任务不存在"}
-    return {"ok": True, "task": info}
-@app.post("/api/system/shutdown")
-def shutdown_system(background_tasks: BackgroundTasks):
-    def _do_shutdown():
-        time.sleep(1)  
-        log("system: 收到前端关机请求，正在通知所有 worker 停止...", "info", category="system")
-        request_stop()  
-        time.sleep(1)  
-        log("system: 正在退出进程...", "info", category="system")
-        import os, signal
-        os.kill(os.getpid(), signal.SIGINT)
-    background_tasks.add_task(_do_shutdown)
-    return {"ok": True, "message": "正在彻底退出系统..."}
+    configure_proxy_runtime(load_app_config_validated, log)
+    configure_nameid_cache(db_get_item_nameid, db_set_item_nameid)
+    init_db()
+    migrate_from_json()
+    _start_background_workers()
+    try:
+        yield
+    finally:
+        request_stop()
+        stop_event.set()
+        await asyncio.to_thread(shutdown_task_queue)
+        with _bg_lock:
+            _bg_started = False
+
+
+app = FastAPI(title="aetherswap", lifespan=_lifespan)
 from app.routes import register_routes
+
 register_routes(app)
+configure_pipeline_resume(start_pipeline)

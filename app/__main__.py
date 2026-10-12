@@ -1,6 +1,6 @@
 """
 Entry point for ``python -m app``.
-Equivalent to running ``python run.py`` from the project root.
+Equivalent to running ``uv run python run.py`` from the project root.
 """
 from app.main import main
 

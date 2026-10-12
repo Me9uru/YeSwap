@@ -19,27 +19,44 @@ def _listing(db_id: int = 7, assetid: str = "asset-old", **overrides):
     return purchase
 
 
-def test_delist_failure_is_structured_instead_of_internal_server_error(monkeypatch):
-    """Regression for the old inner import that shadowed get_purchases."""
-    from app.routes import transactions
-    from app import steam_delist
+def _delist_returns_failure(*_args, **_kwargs):
+    return False, None, "steam failed"
+
+
+def _delist_raises_unexpected(*_args, **_kwargs):
+    raise TimeoutError("timeout")
+
+
+@pytest.mark.parametrize(
+    ("delist_behavior", "error_fragment"),
+    [
+        (_delist_returns_failure, "steam failed"),
+        (_delist_raises_unexpected, "TimeoutError"),
+    ],
+    ids=["failed_result", "unexpected_exception"],
+)
+def test_delist_failure_is_structured_business_error(
+    monkeypatch,
+    delist_behavior,
+    error_fragment,
+):
+    """下架失败（返回失败或抛异常）都返回结构化业务错误，不冒泡成 500。"""
+    from app.services import transactions
+    from app.steam_market import delisting as steam_delist
 
     monkeypatch.setattr(transactions, "get_purchases", lambda: [_listing()])
     monkeypatch.setattr(transactions, "log", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        steam_delist,
-        "delist_item",
-        lambda *args, **kwargs: (False, None, "steam failed"),
-    )
+    monkeypatch.setattr(steam_delist, "delist_item", delist_behavior)
 
     result = transactions.api_delist_purchase(0)
 
-    assert result == {"ok": False, "error": "steam failed"}
+    assert result["ok"] is False
+    assert error_fragment in result["error"]
 
 
 def test_delist_resolves_and_updates_by_stable_database_id(monkeypatch):
-    from app.routes import transactions
-    from app import steam_delist
+    from app.services import transactions
+    from app.steam_market import delisting as steam_delist
 
     calls = []
     purchases = [
@@ -75,23 +92,21 @@ def test_delist_resolves_and_updates_by_stable_database_id(monkeypatch):
         "assetid": "asset-new",
         "record_updated": True,
     }
-    assert calls == [
-        ("delist", "target-asset", "Target Item"),
-        (
-            "update",
-            22,
-            {
-                "assetid": "asset-new",
-                "listing": False,
-                "listing_status": None,
-            },
-        ),
-    ]
+    # 按 _db_id=22 定位记录：下架针对的是该记录的 assetid，而不是列表里位置靠前的记录
+    delisted = [call for call in calls if call[0] == "delist"]
+    assert delisted == [("delist", "target-asset", "Target Item")]
+    updated = [call for call in calls if call[0] == "update"]
+    assert len(updated) == 1
+    _, update_db_id, update_data = updated[0]
+    assert update_db_id == 22
+    assert update_data["assetid"] == "asset-new"
+    assert update_data["listing"] is False
+    assert update_data["listing_status"] is None
 
 
 def test_delist_rejects_stale_database_id_without_calling_steam(monkeypatch):
-    from app.routes import transactions
-    from app import steam_delist
+    from app.services import transactions
+    from app.steam_market import delisting as steam_delist
 
     monkeypatch.setattr(transactions, "get_purchases", lambda: [_listing(db_id=7)])
     monkeypatch.setattr(
@@ -108,27 +123,9 @@ def test_delist_rejects_stale_database_id_without_calling_steam(monkeypatch):
     assert "刷新" in result["error"]
 
 
-def test_delist_converts_unexpected_steam_exception_to_business_error(monkeypatch):
-    from app.routes import transactions
-    from app import steam_delist
-
-    monkeypatch.setattr(transactions, "get_purchases", lambda: [_listing()])
-    monkeypatch.setattr(transactions, "log", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        steam_delist,
-        "delist_item",
-        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("timeout")),
-    )
-
-    result = transactions.api_delist_purchase(0)
-
-    assert result["ok"] is False
-    assert "TimeoutError" in result["error"]
-
-
 def test_delist_reports_remote_success_when_local_update_fails(monkeypatch):
-    from app.routes import transactions
-    from app import steam_delist
+    from app.services import transactions
+    from app.steam_market import delisting as steam_delist
 
     monkeypatch.setattr(transactions, "get_purchases", lambda: [_listing()])
     monkeypatch.setattr(transactions, "log", lambda *args, **kwargs: None)
@@ -167,7 +164,7 @@ def test_delist_rejects_obvious_failure_after_http_200(
     response_text,
     error_fragment,
 ):
-    from app import steam_delist
+    from app.steam_market import delisting as steam_delist
 
     class Response:
         status_code = 200
@@ -239,7 +236,7 @@ def test_delist_rejects_obvious_failure_after_http_200(
 
 
 def test_inventory_query_distinguishes_failure_from_empty_inventory():
-    from app import steam_delist
+    from app.steam_market import delisting as steam_delist
 
     class FailedSession:
         def get(self, *args, **kwargs):

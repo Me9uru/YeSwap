@@ -5,9 +5,9 @@ import uuid
 from typing import Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
-from app.config_loader import get_steam_credentials
-from app import gift_engine
-from app.accounts import get_current_account, update_account
+from app.configuration.repository import get_steam_credentials
+from app.gifts import engine as gift_engine
+from app.accounts.repository import get_current_account, update_account
 from app.services.account_region import _region_from_settlement_currency
 from app.services.steam_auth import steam_id_from_cookie_str
 router = APIRouter()

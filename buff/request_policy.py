@@ -5,6 +5,7 @@ other credentials must never be written to the circuit-breaker state file.
 """
 
 from __future__ import annotations
+from utils.paths import DATA_DIR
 
 import hashlib
 import json
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_MIN_REQUEST_INTERVAL = 2.0
 DEFAULT_RATE_LIMIT_SECONDS = 300.0
 DEFAULT_POLICY_STATE_PATH = (
-    Path(__file__).resolve().parent.parent / "config" / "buff_request_policy.json"
+    DATA_DIR / "buff_request_policy.json"
 )
 
 
@@ -256,9 +257,33 @@ class BuffRequestPolicy:
     def request_slot(self, account_key: str) -> Iterator[None]:
         """Hold the account lock for one complete HTTP request."""
 
+        with self._paced_slot(account_key, allow_verification=False):
+            yield
+
+    @contextmanager
+    def verification_slot(self, account_key: str) -> Iterator[None]:
+        """Pace a browser verification probe while retaining server cooldowns.
+
+        A human can resolve a verification or risk circuit in the browser, but
+        the browser probe still shares the account's request interval. A 429
+        remains blocked; an unreadable policy file is cleared only after a
+        successful browser probe.
+        """
+
+        with self._paced_slot(account_key, allow_verification=True):
+            yield
+
+    @contextmanager
+    def _paced_slot(self, account_key: str, *, allow_verification: bool) -> Iterator[None]:
         lock = self._account_lock(account_key)
         with lock:
-            self.raise_if_blocked(account_key)
+            try:
+                self.raise_if_blocked(account_key)
+            except BuffRateLimited:
+                raise
+            except BuffRequestBlocked:
+                if not allow_verification:
+                    raise
             previous = self._last_started.get(account_key)
             if previous is not None:
                 remaining = self.min_interval - (self._clock() - previous)

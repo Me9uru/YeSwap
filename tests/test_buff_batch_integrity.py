@@ -3,10 +3,8 @@ from decimal import Decimal
 
 import pytest
 
-from app.pipeline_steps import (
-    _affordable_quantity,
-    _validate_unique_batch_matches,
-)
+from app.purchase.models import _affordable_quantity
+from app.purchase.settlement import _validate_unique_batch_matches
 from app.services.buff_client import BuffClient
 from buff import BuffWriteResultUnknown
 from buff.buyer import BuffBuyer, PAY_METHOD_WECHAT
@@ -39,8 +37,6 @@ def test_batch_frozen_amount_uses_exact_currency_arithmetic(monkeypatch):
 
 
 def test_exact_budget_multiple_does_not_plan_one_item_too_few():
-    # Binary float division produces 2.9999999999999996 here.
-    assert 0.15 / 0.05 < 3
     assert _affordable_quantity(0.15, 0, 0.05) == 3
     assert _affordable_quantity(0.30, 0.10, 0.20) == 1
 

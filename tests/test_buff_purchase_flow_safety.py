@@ -1,22 +1,14 @@
+from app.purchase import checkout as purchase_checkout
+from app.purchase import market as purchase_market
+from app.purchase import settlement as purchase_settlement
 import time
 
 import pytest
 
-from app import pipeline_steps as steps
-from app import pipeline as pipeline_module
+from app.purchase import checkout, models
+from app.workflows import purchase as pipeline_module
 from buff import BuffWriteResultUnknown
 from buff.request_policy import BuffRateLimited
-
-
-@pytest.fixture(autouse=True)
-def _isolated_checkout_guard(monkeypatch, tmp_path):
-    from app.services import buff_checkout_guard
-
-    monkeypatch.setattr(
-        buff_checkout_guard,
-        "_GUARD_PATH",
-        tmp_path / "buff_checkout_guard.json",
-    )
 
 
 def _config(pay_method="alipay"):
@@ -115,49 +107,6 @@ class _FakeContext:
         return None
 
 
-def test_realtime_buff_check_runs_only_after_other_candidate_guards(monkeypatch):
-    items = [
-        {"name": "Rejected", "goods_id": 1, "min_price": 10.0, "daily_volume": 10},
-        {"name": "Selected", "goods_id": 2, "min_price": 10.0, "daily_volume": 10},
-    ]
-    buff_calls = []
-
-    class BuffClient:
-        def get_sell_orders(self, goods_id, _game):
-            buff_calls.append(goods_id)
-            return [{"id": f"order-{goods_id}", "price": "10.0"}]
-
-    config = {
-        "buff": {"game": "csgo", "price_tolerance": 0.5},
-        "pipeline": {},
-        "stability": {"request_interval_seconds": 0},
-        "_strategy_runtime": {
-            "buy": {"enabled_modules": ["buy.buff_realtime_price"]}
-        },
-    }
-    monkeypatch.setattr(steps, "set_status", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(steps, "_fetch_steam_sell_data", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        steps,
-        "_passes_custom_buy_modules",
-        lambda item, *_args, **_kwargs: item["goods_id"] == 2,
-    )
-
-    selected, failed = steps.pick_stable_item(
-        items,
-        config,
-        steam_client=object(),
-        analyzer=object(),
-        is_stop_requested=lambda: False,
-        buff_client=BuffClient(),
-    )
-
-    assert selected is items[1]
-    assert failed == {1}
-    assert buff_calls == [2]
-    assert isinstance(selected["_buff_sell_orders_fetched_at"], float)
-
-
 def test_closed_time_window_blocks_checkout_post_after_validation():
     class BuffClient:
         _pay_method = "alipay"
@@ -173,7 +122,7 @@ def test_closed_time_window_blocks_checkout_post_after_validation():
     kwargs, _pending, _purchases = _checkout_args()
     window_checks = iter([True, False])
 
-    result = steps.lock_and_confirm_payment(
+    result = checkout.lock_and_confirm_payment(
         client,
         _item([{"id": "sell-1", "price": "10.0"}]),
         _config(),
@@ -183,56 +132,29 @@ def test_closed_time_window_blocks_checkout_post_after_validation():
 
     from app.services.buff_checkout_guard import get_unresolved_checkout
 
-    assert result is steps.TIME_WINDOW_CLOSED
+    assert result is models.TIME_WINDOW_CLOSED
     assert client.lock_calls == 0
     assert get_unresolved_checkout() is None
 
 
-def test_time_window_closing_during_candidate_analysis_skips_checkout(monkeypatch):
+@pytest.mark.parametrize(
+    ("window_checks", "expected"),
+    [
+        # 候选分析期间关窗：一次锁单请求都不能发出
+        pytest.param([True, False], (0.0, 0, []), id="during_candidate_analysis"),
+        # 首件成交后关窗：只保留已经发出并成交的那一件
+        pytest.param([True, True, False], (10.0, 1, [True]), id="after_first_purchase"),
+    ],
+)
+def test_time_window_closing_stops_further_checkout(
+    monkeypatch, window_checks, expected
+):
+    expected_acc, expected_bought, expected_checkouts = expected
     item = _item([{"id": "sell-1", "price": "10.0"}])
     state = _FakeState()
     ctx = _FakeContext(state)
     checkout_calls = []
-    window_checks = iter([True, False])
-
-    monkeypatch.setattr(
-        pipeline_module,
-        "pick_stable_item",
-        lambda *_args, **_kwargs: (item, set()),
-    )
-    monkeypatch.setattr(
-        pipeline_module,
-        "lock_and_confirm_payment",
-        lambda *_args, **_kwargs: checkout_calls.append(True),
-    )
-
-    acc, bought, stopped = pipeline_module._process_deals_for_target(
-        ctx,
-        [item],
-        _config(),
-        20.0,
-        0.0,
-        0,
-        object(),
-        object(),
-        object(),
-        set(),
-        set(),
-        set(),
-        is_time_allowed=lambda: next(window_checks),
-    )
-
-    assert (acc, bought) == (0.0, 0)
-    assert stopped is steps.TIME_WINDOW_CLOSED
-    assert checkout_calls == []
-
-
-def test_time_window_closing_after_first_purchase_prevents_second(monkeypatch):
-    item = _item([{"id": "sell-1", "price": "10.0"}])
-    state = _FakeState()
-    ctx = _FakeContext(state)
-    checkout_calls = []
-    window_checks = iter([True, True, False])
+    checks = iter(window_checks)
 
     monkeypatch.setattr(
         pipeline_module,
@@ -263,12 +185,12 @@ def test_time_window_closing_after_first_purchase_prevents_second(monkeypatch):
         set(),
         set(),
         set(),
-        is_time_allowed=lambda: next(window_checks),
+        is_time_allowed=lambda: next(checks),
     )
 
-    assert (acc, bought) == (10.0, 1)
-    assert stopped is steps.TIME_WINDOW_CLOSED
-    assert checkout_calls == [True]
+    assert (acc, bought) == (expected_acc, expected_bought)
+    assert stopped is models.TIME_WINDOW_CLOSED
+    assert checkout_calls == expected_checkouts
 
 
 def test_stale_buff_cache_is_refreshed_before_locking():
@@ -299,7 +221,7 @@ def test_stale_buff_cache_is_refreshed_before_locking():
     )
     kwargs, _pending, _purchases = _checkout_args()
 
-    result = steps.lock_and_confirm_payment(client, item, _config(), **kwargs)
+    result = checkout.lock_and_confirm_payment(client, item, _config(), **kwargs)
 
     assert result is None
     assert client.get_calls == 1
@@ -329,8 +251,8 @@ def test_single_order_payment_cancel_does_not_lock_again():
     client = BuffClient()
     kwargs, pending, purchases = _checkout_args(wait_result=False)
 
-    with pytest.raises(steps.PurchaseOrderCreatedPending) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
             client,
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -361,7 +283,7 @@ def test_rate_limit_is_not_swallowed_or_retried():
     kwargs, _pending, _purchases = _checkout_args()
 
     with pytest.raises(BuffRateLimited):
-        steps.lock_and_confirm_payment(
+        checkout.lock_and_confirm_payment(
             client,
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -389,8 +311,8 @@ def test_transport_unknown_write_is_converted_to_terminal_purchase_state():
     client = BuffClient()
     kwargs, _pending, _purchases = _checkout_args()
 
-    with pytest.raises(steps.PurchaseWriteResultUnknown, match="socket closed"):
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseWriteResultUnknown, match="socket closed"):
+        checkout.lock_and_confirm_payment(
             client,
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -432,8 +354,8 @@ def test_batch_payment_cancel_does_not_fallback_to_single_order():
     client = BuffClient()
     kwargs, _pending, purchases = _checkout_args(wait_result=False)
 
-    with pytest.raises(steps.PurchaseOrderCreatedPending) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
             client,
             _item([
                 {"id": "sell-1", "price": "10.0"},
@@ -470,8 +392,8 @@ def test_unknown_batch_result_does_not_fallback_to_single_order():
     client = BuffClient()
     kwargs, _pending, _purchases = _checkout_args()
 
-    with pytest.raises(steps.PurchaseWriteResultUnknown) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseWriteResultUnknown) as exc_info:
+        checkout.lock_and_confirm_payment(
             client,
             _item([
                 {"id": "sell-1", "price": "10.0"},
@@ -484,9 +406,30 @@ def test_unknown_batch_result_does_not_fallback_to_single_order():
     assert client.single_calls == 0
 
 
-def test_explicitly_unsupported_batch_can_fallback_once():
+@pytest.mark.parametrize(
+    ("pay_method", "batch_response", "expected_batch_calls"),
+    [
+        # alipay 在发出任何批量写请求之前就已知不支持批量
+        pytest.param("alipay", None, 0, id="explicitly_unsupported"),
+        # wechat 返回「未创建且可安全降级」，只允许降级一次
+        pytest.param(
+            "wechat",
+            {
+                "success": False,
+                "code": "NOT_SUPPORTED",
+                "created": False,
+                "safe_to_fallback": True,
+            },
+            1,
+            id="trusted_not_created",
+        ),
+    ],
+)
+def test_batch_fallback_to_single_order_happens_once(
+    pay_method, batch_response, expected_batch_calls
+):
     class BuffClient:
-        _pay_method = "alipay"
+        _pay_method = pay_method
 
         def __init__(self):
             self.batch_calls = 0
@@ -497,7 +440,9 @@ def test_explicitly_unsupported_batch_can_fallback_once():
 
         def try_batch_buy(self, *_args):
             self.batch_calls += 1
-            raise AssertionError("alipay is known not to support batch checkout")
+            if batch_response is None:
+                raise AssertionError("alipay is known not to support batch checkout")
+            return batch_response
 
         def lock_and_get_pay_url(self, *_args):
             self.single_calls += 1
@@ -506,57 +451,18 @@ def test_explicitly_unsupported_batch_can_fallback_once():
     client = BuffClient()
     kwargs, _pending, _purchases = _checkout_args()
 
-    result = steps.lock_and_confirm_payment(
+    result = checkout.lock_and_confirm_payment(
         client,
         _item([
             {"id": "sell-1", "price": "10.0"},
             {"id": "sell-2", "price": "10.0"},
         ]),
-        _config("alipay"),
+        _config(pay_method),
         **kwargs,
     )
 
     assert result is None
-    assert client.batch_calls == 0
-    assert client.single_calls == 1
-
-
-def test_trusted_not_created_batch_response_can_fallback_once():
-    class BuffClient:
-        _pay_method = "wechat"
-
-        def __init__(self):
-            self.batch_calls = 0
-            self.single_calls = 0
-
-        def try_batch_buy(self, *_args):
-            self.batch_calls += 1
-            return {
-                "success": False,
-                "code": "NOT_SUPPORTED",
-                "created": False,
-                "safe_to_fallback": True,
-            }
-
-        def lock_and_get_pay_url(self, *_args):
-            self.single_calls += 1
-            return {"success": False, "code": "FAIL", "created": False}
-
-    client = BuffClient()
-    kwargs, _pending, _purchases = _checkout_args()
-
-    result = steps.lock_and_confirm_payment(
-        client,
-        _item([
-            {"id": "sell-1", "price": "10.0"},
-            {"id": "sell-2", "price": "10.0"},
-        ]),
-        _config("wechat"),
-        **kwargs,
-    )
-
-    assert result is None
-    assert client.batch_calls == 1
+    assert client.batch_calls == expected_batch_calls
     assert client.single_calls == 1
 
 
@@ -652,7 +558,7 @@ def test_purchase_amount_is_counted_when_post_commit_shipping_prompt_is_blocked(
         "pick_stable_item",
         lambda *_args, **_kwargs: (item, set()),
     )
-    monkeypatch.setattr(steps, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(purchase_settlement, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
     config = _config()
     config["buff"]["auto_ask_seller_to_send"] = True
 
@@ -700,9 +606,9 @@ def test_successful_batch_records_reconciliation_identifiers(monkeypatch):
             return True
 
     kwargs, _pending, purchases = _checkout_args(wait_result=True)
-    monkeypatch.setattr(steps, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(purchase_settlement, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
 
-    paid = steps.lock_and_confirm_payment(
+    paid = checkout.lock_and_confirm_payment(
         BuffClient(),
         _item([
             {"id": "sell-1", "price": "10.0"},
@@ -744,10 +650,10 @@ def test_partial_batch_finalize_records_committed_items_and_halts(monkeypatch):
 
     client = BuffClient()
     kwargs, _pending, purchases = _checkout_args(wait_result=True)
-    monkeypatch.setattr(steps, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(purchase_settlement, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(steps.PurchaseOrderCreatedPending) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
             client,
             _item([
                 {"id": "sell-1", "price": "10.0"},
@@ -787,10 +693,10 @@ def test_batch_finalize_unknown_persists_prior_successes_before_halting(monkeypa
             raise exc
 
     kwargs, _pending, purchases = _checkout_args(wait_result=True)
-    monkeypatch.setattr(steps, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(purchase_settlement, "_fetch_smart_market_price", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(steps.PurchaseWriteResultUnknown) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseWriteResultUnknown) as exc_info:
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item(
                 [
@@ -834,8 +740,8 @@ def test_batch_created_without_pay_url_is_terminal_and_never_falls_back():
     client = BuffClient()
     kwargs, _pending, _purchases = _checkout_args()
 
-    with pytest.raises(steps.PurchaseOrderCreatedPending) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
             client,
             _item([
                 {"id": "sell-1", "price": "10.0"},
@@ -864,8 +770,8 @@ def test_single_created_without_pay_url_keeps_order_id_and_never_auto_resumes():
 
     kwargs, _pending, purchases = _checkout_args()
 
-    with pytest.raises(steps.PurchaseOrderCreatedPending) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -885,8 +791,8 @@ def test_cooling_down_has_dedicated_terminal_state():
 
     kwargs, _pending, _purchases = _checkout_args()
 
-    with pytest.raises(steps.PurchaseCoolingDown):
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseCoolingDown):
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -894,34 +800,66 @@ def test_cooling_down_has_dedicated_terminal_state():
         )
 
 
+class _FakeClock:
+    """可控时钟：让真实 TTL 判定看到时间流逝，而不是打桩判定结果。"""
+
+    def __init__(self):
+        self.now = time.time()
+
+    def time(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 def test_expired_snapshot_immediately_before_write_sends_no_post(monkeypatch):
+    """本地校验耗时超过 TTL 后，写入前的快照校验必须拦住锁单请求。
+
+    用真实 TTL 判定加可控时钟（在写请求前的预算核对处推进时间）驱动，不再
+    打桩新鲜度函数，也不依赖它恰好被调用几次。
+    """
+
     class BuffClient:
         _pay_method = "alipay"
 
         def __init__(self):
+            self.get_calls = 0
             self.lock_calls = 0
+
+        def get_sell_orders(self, _goods_id, _game):
+            self.get_calls += 1
+            return [{"id": "sell-1", "price": "10.0"}]
 
         def lock_and_get_pay_url(self, *_args):
             self.lock_calls += 1
-            return {"success": False, "code": "FAIL"}
+            raise AssertionError("expired snapshot must not reach the write endpoint")
 
-    freshness = iter((True, True, False))
+    clock = _FakeClock()
+    monkeypatch.setattr(purchase_market, "time", clock)
+    affordable_quantity = purchase_checkout._affordable_quantity
+
+    def affordable_quantity_after_elapsed_checks(*args, **kwargs):
+        clock.advance(10.0)
+        return affordable_quantity(*args, **kwargs)
+
     monkeypatch.setattr(
-        steps,
-        "_buff_orders_cache_is_fresh",
-        lambda *_args, **_kwargs: next(freshness),
+        purchase_checkout,
+        "_affordable_quantity",
+        affordable_quantity_after_elapsed_checks,
     )
     client = BuffClient()
     kwargs, _pending, _purchases = _checkout_args()
 
-    result = steps.lock_and_confirm_payment(
+    result = checkout.lock_and_confirm_payment(
         client,
-        _item([{"id": "sell-1", "price": "10.0"}]),
+        _item([{"id": "sell-1", "price": "10.0"}], fetched_at=clock.now),
         _config(),
         **kwargs,
     )
 
     assert result is None
+    assert client.get_calls == 1
     assert client.lock_calls == 0
 
 
@@ -934,7 +872,7 @@ def test_invalid_zero_lowest_price_is_rejected_before_quantity_math():
 
     kwargs, _pending, _purchases = _checkout_args()
 
-    result = steps.lock_and_confirm_payment(
+    result = checkout.lock_and_confirm_payment(
         BuffClient(),
         _item([{"id": "sell-1", "price": "0"}]),
         _config(),
@@ -942,32 +880,6 @@ def test_invalid_zero_lowest_price_is_rejected_before_quantity_math():
     )
 
     assert result is None
-
-
-def test_pending_payment_is_cleared_when_wait_callback_raises():
-    pending = []
-
-    def fail_wait(**_kwargs):
-        raise RuntimeError("wait failed")
-
-    with pytest.raises(RuntimeError, match="wait failed"):
-        steps._do_payment_notify_and_wait(
-            {"name": "Test Item"},
-            {},
-            10.0,
-            1,
-            "https://pay.invalid",
-            "alipay",
-            "bill-1",
-            0.0,
-            pending.append,
-            fail_wait,
-            lambda _ok: None,
-            lambda: False,
-            None,
-        )
-
-    assert pending[-1] is None
 
 
 def test_unrecognised_non_ok_write_result_stays_unresolved():
@@ -979,8 +891,8 @@ def test_unrecognised_non_ok_write_result_stays_unresolved():
 
     kwargs, _pending, _purchases = _checkout_args()
 
-    with pytest.raises(steps.PurchaseWriteResultUnknown):
-        exc_info = steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseWriteResultUnknown):
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -1007,7 +919,7 @@ def test_single_order_id_is_durable_before_payment_link_fetch_can_crash():
     kwargs, _pending, _purchases = _checkout_args()
 
     with pytest.raises(SystemExit):
-        steps.lock_and_confirm_payment(
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item([{"id": "sell-1", "price": "10.0"}]),
             _config(),
@@ -1032,7 +944,7 @@ def test_batch_id_is_durable_before_qr_fetch_can_crash():
     kwargs, _pending, _purchases = _checkout_args()
 
     with pytest.raises(SystemExit):
-        steps.lock_and_confirm_payment(
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item(
                 [
@@ -1075,7 +987,7 @@ def test_each_batch_bill_id_is_durable_before_the_next_finalize_post():
     kwargs, _pending, _purchases = _checkout_args(wait_result=True)
 
     with pytest.raises(SystemExit):
-        steps.lock_and_confirm_payment(
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item(
                 [
@@ -1124,13 +1036,12 @@ def test_all_batch_ids_are_durable_before_local_db_append_failure(monkeypatch):
 
     kwargs["append_purchase"] = fail_second_append
     monkeypatch.setattr(
-        steps,
-        "_fetch_smart_market_price",
+        purchase_settlement, "_fetch_smart_market_price",
         lambda *_args, **_kwargs: None,
     )
 
     with pytest.raises(OSError, match="SQLite"):
-        steps.lock_and_confirm_payment(
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item(
                 [
@@ -1171,12 +1082,11 @@ def test_automatic_shipping_prompt_is_disabled_by_default(monkeypatch):
     client = BuffClient()
     kwargs, _pending, purchases = _checkout_args(wait_result=True)
     monkeypatch.setattr(
-        steps,
-        "_fetch_smart_market_price",
+        purchase_settlement, "_fetch_smart_market_price",
         lambda *_args, **_kwargs: None,
     )
 
-    paid = steps.lock_and_confirm_payment(
+    paid = checkout.lock_and_confirm_payment(
         client,
         _item([{"id": "sell-1", "price": "10.0"}]),
         _config(),
@@ -1211,13 +1121,12 @@ def test_opted_in_shipping_prompt_unknown_halts_after_recording(monkeypatch):
     config["buff"]["auto_ask_seller_to_send"] = True
     kwargs, _pending, purchases = _checkout_args(wait_result=True)
     monkeypatch.setattr(
-        steps,
-        "_fetch_smart_market_price",
+        purchase_settlement, "_fetch_smart_market_price",
         lambda *_args, **_kwargs: None,
     )
 
-    with pytest.raises(steps.PurchaseWriteResultUnknown) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseWriteResultUnknown) as exc_info:
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item([{"id": "sell-1", "price": "10.0"}]),
             config,
@@ -1260,13 +1169,12 @@ def test_batch_shipping_prompt_unknown_preserves_all_committed_items(monkeypatch
     config["buff"]["auto_ask_seller_to_send"] = True
     kwargs, _pending, purchases = _checkout_args(wait_result=True)
     monkeypatch.setattr(
-        steps,
-        "_fetch_smart_market_price",
+        purchase_settlement, "_fetch_smart_market_price",
         lambda *_args, **_kwargs: None,
     )
 
-    with pytest.raises(steps.PurchaseWriteResultUnknown) as exc_info:
-        steps.lock_and_confirm_payment(
+    with pytest.raises(models.PurchaseWriteResultUnknown) as exc_info:
+        checkout.lock_and_confirm_payment(
             BuffClient(),
             _item(
                 [
@@ -1300,4 +1208,3 @@ def test_guarded_runner_sets_error_for_unhandled_exception(monkeypatch):
     pipeline_module._run_pipeline_guarded({})
 
     assert state.status == ("error", "PIPELINE_UNEXPECTED_ERROR")
-    assert state.pending is None

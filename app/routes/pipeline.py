@@ -1,13 +1,24 @@
 """Pipeline start/stop routes."""
-from fastapi import APIRouter
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.pipeline import get_pipeline_start_blocker, start_pipeline
-from app.state import request_stop, set_status, log
+from app.workflows.purchase import get_pipeline_start_blocker, start_pipeline
+from app.services.buff_checkout_guard import (
+    BuffCheckoutGuardMismatch,
+    acknowledge_checkout,
+)
+from app.runtime.state import request_stop, set_status, log
 router = APIRouter()
 class ConfigBody(BaseModel):
     config: dict
     acknowledge_buff_reconciliation: bool = False
     buff_reconciliation_intent_id: str = ""
+
+
+class CheckoutReconcileBody(BaseModel):
+    intent_id: str
+    outcome: Literal["cancelled_or_unpaid", "handled_externally"]
 @router.post("/api/pipeline/start")
 def api_pipeline_start(body: ConfigBody):
     blocker = get_pipeline_start_blocker()
@@ -58,6 +69,34 @@ def api_buff_checkout_guard():
         ),
         "checkout": blocker.get("checkout") or {},
     }
+
+
+@router.post("/api/pipeline/buff_checkout_guard/reconcile")
+def api_reconcile_buff_checkout(body: CheckoutReconcileBody):
+    intent_id = body.intent_id.strip()
+    if not intent_id:
+        raise HTTPException(status_code=400, detail="缺少 checkout intent_id")
+    blocker = get_pipeline_start_blocker()
+    checkout = blocker.get("checkout") or {}
+    if blocker.get("code") != "BUFF_RECONCILIATION_REQUIRED":
+        raise HTTPException(status_code=409, detail="当前没有待对账的 BUFF 订单")
+    if str(checkout.get("intent_id") or "") != intent_id:
+        raise HTTPException(status_code=409, detail="待对账订单已变化，请刷新后重试")
+    reason = (
+        "user_confirmed_cancelled_or_unpaid"
+        if body.outcome == "cancelled_or_unpaid"
+        else "user_confirmed_handled_externally"
+    )
+    try:
+        acknowledge_checkout(intent_id, reason)
+    except BuffCheckoutGuardMismatch as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    log(
+        f"BUFF checkout 已人工对账并解除门禁 intent_id={intent_id} outcome={body.outcome}",
+        level="warn",
+        category="buff",
+    )
+    return {"ok": True}
 @router.post("/api/pipeline/stop")
 def api_pipeline_stop():
     request_stop()

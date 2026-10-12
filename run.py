@@ -1,8 +1,8 @@
 """
 Project root entry point.
 Usage:
-    python run.py          # from project root
-    python -m app          # from project root (equivalent)
+    uv run python run.py   # from project root
+    uv run python -m app   # from project root (equivalent)
 """
 import sys
 from pathlib import Path

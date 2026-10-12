@@ -1,0 +1,1 @@
+"""Separated application responsibilities."""

@@ -1,8 +1,8 @@
 """Status, log, plan, and payment-related routes."""
 from pathlib import Path
-from fastapi import APIRouter
-from app.config_loader import load_app_config_validated
-from app.state import (
+from fastapi import APIRouter, HTTPException
+from app.configuration.repository import load_app_config_validated
+from app.runtime.state import (
     clear_log,
     confirm_payment,
     get_log,
@@ -21,6 +21,7 @@ from utils.time import (
 router = APIRouter()
 class ConfirmBody(BaseModel):
     ok: bool
+    expected_order_id: str = ""
 @router.get("/api/status")
 def api_status():
     st = get_status()
@@ -66,6 +67,14 @@ def api_pending_payment():
     return {"pending": get_pending_payment()}
 @router.post("/api/confirm_payment")
 def api_confirm_payment(body: ConfirmBody):
-    confirm_payment(body.ok)
+    accepted = confirm_payment(
+        body.ok,
+        expected_order_id=body.expected_order_id.strip(),
+    )
+    if not accepted:
+        raise HTTPException(
+            status_code=409,
+            detail="待确认订单已变化，请刷新页面后重新核对订单号",
+        )
     set_pending_payment(None)
     return {"ok": True}

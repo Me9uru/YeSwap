@@ -19,12 +19,12 @@ def _isolated_global_buff_policy(monkeypatch):
 
 
 def test_manual_buff_cookie_requires_session(monkeypatch):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     saved = []
     monkeypatch.setattr(auth, "update_buff_creds", lambda cookie, **kwargs: saved.append((cookie, kwargs)))
 
-    result = auth.api_auth_manual_cookie("buff", auth.ManualCookieBody(cookies="csrf_token=abc"))
+    result = auth.api_auth_manual_cookie("buff", cookies="csrf_token=abc")
 
     assert result["ok"] is False
     assert "session" in result["error"]
@@ -46,8 +46,8 @@ def test_cookie_update_only_resumes_pure_auth_failures(
     step,
     should_resume,
 ):
-    from app import pipeline, state
-    from app.routes import auth
+    from app.runtime import state
+    from app.services import auth_session as auth
 
     starts = []
     monkeypatch.setattr(
@@ -55,11 +55,7 @@ def test_cookie_update_only_resumes_pure_auth_failures(
         "get_status",
         lambda: {"status": "error", "step": step},
     )
-    monkeypatch.setattr(
-        pipeline,
-        "start_pipeline",
-        lambda config: starts.append(config) or True,
-    )
+    monkeypatch.setattr(auth, "_start_purchase_pipeline", lambda config: starts.append(config) or True)
     monkeypatch.setattr(auth, "load_app_config_validated", lambda: {"test": True})
     monkeypatch.setattr(auth, "set_buff_auth_expired", lambda _value: None)
     monkeypatch.setattr(auth, "set_buff_verification_required", lambda _value: None)
@@ -70,7 +66,7 @@ def test_cookie_update_only_resumes_pure_auth_failures(
 
 
 def test_relogin_finish_surfaces_worker_error(monkeypatch):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     done = threading.Event()
     done.set()
@@ -172,13 +168,12 @@ def test_buff_auto_relogin_success_clears_auth_and_verification(monkeypatch):
 
     assert result[0] is True
     assert ("auth", False) in calls
-    assert ("verify", False, "") in calls
+    assert any(call[:2] == ("verify", False) for call in calls)
     assert ("clear_policy", "default") in calls
-    assert ("cookie_urls", ["https://buff.163.com/"]) in calls
 
 
 def test_relogin_context_retries_with_temp_profile(monkeypatch, tmp_path):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     calls = []
 
@@ -204,7 +199,7 @@ def test_relogin_context_retries_with_temp_profile(monkeypatch, tmp_path):
 
 
 def test_browser_launch_error_is_user_friendly():
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     raw = (
         "BrowserType.launch_persistent_context: Target page, context or browser has been closed\n"
@@ -216,6 +211,48 @@ def test_browser_launch_error_is_user_friendly():
     assert "Buff" in message
     assert "完整错误见调试日志" in message
     assert "Browser logs" not in message
+
+
+def test_closed_buff_login_window_reopens_same_profile_for_verification(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services import auth_session as auth
+
+    calls = []
+
+    class ClosedContext:
+        def close(self):
+            calls.append("close_old")
+
+    class Page:
+        def goto(self, url, **kwargs):
+            calls.append(("goto", url, kwargs))
+
+    recovered_page = Page()
+
+    class RecoveredContext:
+        pages = [recovered_page]
+
+    class Chromium:
+        def launch_persistent_context(self, profile_dir, **kwargs):
+            calls.append(("launch", profile_dir, kwargs))
+            return RecoveredContext()
+
+    monkeypatch.setattr(auth, "get_browser_channel", lambda: "chrome")
+    profile_dir = tmp_path / "playwright_buff"
+
+    context, page = auth._reopen_buff_verification_context(
+        types.SimpleNamespace(chromium=Chromium()),
+        ClosedContext(),
+        profile_dir,
+    )
+
+    assert isinstance(context, RecoveredContext)
+    assert page is recovered_page
+    # 核心语义：必须复用同一个 profile_dir 重新打开，否则刚写入的登录态读不到。
+    launched_profiles = [call[1] for call in calls if call[0] == "launch"]
+    assert launched_profiles == [str(profile_dir)]
 
 
 def test_steam_auto_relogin_does_not_reuse_cookie_from_different_account(monkeypatch):

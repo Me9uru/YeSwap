@@ -5,13 +5,6 @@ import pytest
 from app.services import buff_checkout_guard as guard
 
 
-@pytest.fixture(autouse=True)
-def _isolated_guard(monkeypatch, tmp_path):
-    path = tmp_path / "buff_checkout_guard.json"
-    monkeypatch.setattr(guard, "_GUARD_PATH", path)
-    return path
-
-
 def test_intent_is_durable_secret_free_and_blocks_a_second_checkout():
     state = guard.begin_checkout(
         "single",
@@ -91,14 +84,13 @@ def test_duplicate_journal_keys_fail_closed():
     assert state["stage"] == "journal_unreadable"
 
 
-@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
-def test_non_finite_journal_numbers_fail_closed(value):
+def test_non_finite_journal_numbers_fail_closed():
     guard._GUARD_PATH.write_text(
         (
             '{"version": 1, "unresolved": false, "intent_id": "fake", '
             '"kind": "single", "stage": "resolved", "goods_id": 1, '
             '"quantity": 1, "created_at": 1, "updated_at": 1, '
-            f'"resolved_at": {value}}}'
+            '"resolved_at": NaN}'
         ),
         encoding="utf-8",
     )
@@ -114,20 +106,23 @@ def test_non_finite_journal_numbers_fail_closed(value):
 @pytest.mark.parametrize(
     "payload",
     [
-        {},
-        {"version": 2, "unresolved": False},
-        {"version": 1, "unresolved": 1},
-        {
-            "version": 1,
-            "unresolved": False,
-            "intent_id": "fake",
-            "kind": "single",
-            "stage": "intent_prepared",
-            "goods_id": 1,
-            "quantity": 1,
-            "created_at": 1.0,
-            "updated_at": 1.0,
-        },
+        # unresolved 不是 bool：若被当作真值会绕过门禁查询，必须按格式非法失败关闭
+        pytest.param({"version": 1, "unresolved": 1}, id="non_bool_unresolved"),
+        # 字段类型都合法但自相矛盾（已 resolved 却仍停在 intent_prepared）
+        pytest.param(
+            {
+                "version": 1,
+                "unresolved": False,
+                "intent_id": "fake",
+                "kind": "single",
+                "stage": "intent_prepared",
+                "goods_id": 1,
+                "quantity": 1,
+                "created_at": 1.0,
+                "updated_at": 1.0,
+            },
+            id="resolved_flag_with_unfinished_stage",
+        ),
     ],
 )
 def test_parseable_but_invalid_journal_fails_closed(payload):

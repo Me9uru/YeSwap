@@ -393,7 +393,7 @@ class BuffClient:
 
 
 def create_buff_client_from_config(credentials: dict, config: dict) -> BuffClient:
-    from app.config_loader import get_buff_credentials, update_buff_creds
+    from app.configuration.repository import get_buff_credentials, update_buff_creds
 
     credentials = credentials or {}
     buff_cfg = config.get("buff", {})

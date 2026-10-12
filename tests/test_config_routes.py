@@ -13,11 +13,10 @@ def test_config_route_persists_all_settings_checkboxes(monkeypatch):
         "notify": {},
         "steam_confirm": {},
         "system": {},
-        "steam_deals": {},
     }
 
     def fake_update(patch):
-        from app.config_schema import merge
+        from app.configuration.schema import merge
 
         updated = merge(state, patch)
         state.clear()
@@ -33,7 +32,6 @@ def test_config_route_persists_all_settings_checkboxes(monkeypatch):
                 "notify": {"holdings_report_drop_enabled": False},
                 "steam_confirm": {"enabled": True},
                 "system": {"buff_session_keepalive_enabled": True},
-                "steam_deals": {"enabled": True},
             }
         )
     )
@@ -44,7 +42,6 @@ def test_config_route_persists_all_settings_checkboxes(monkeypatch):
     assert result["config"]["notify"]["holdings_report_drop_enabled"] is False
     assert result["config"]["steam_confirm"]["enabled"] is True
     assert result["config"]["system"]["buff_session_keepalive_enabled"] is True
-    assert result["config"]["steam_deals"]["enabled"] is True
 
 
 def test_config_get_disables_http_caching(monkeypatch):
@@ -58,8 +55,22 @@ def test_config_get_disables_http_caching(monkeypatch):
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_backup_export_omits_removed_game_deal_setting(monkeypatch):
+    from app.services import backup
+
+    monkeypatch.setattr(
+        backup,
+        "load_app_config",
+        lambda: {"pipeline": {"max_discount": 0.8}, "steam_deals": {"enabled": True}},
+    )
+
+    exported = backup.api_export_full()
+
+    assert exported["app_config"] == {"pipeline": {"max_discount": 0.8}}
+
+
 def test_full_import_uses_validated_config_save(monkeypatch):
-    from app.routes import config
+    from app.services import backup as config
 
     calls = {
         "validated": None,
@@ -74,19 +85,19 @@ def test_full_import_uses_validated_config_save(monkeypatch):
     monkeypatch.setattr(config, "accounts_replace_all", lambda data: calls.__setitem__("accounts", calls["accounts"] + 1))
     monkeypatch.setattr(config, "replace_log", lambda data: calls.__setitem__("log", calls["log"] + 1))
 
-    body = config.ImportFullBody(app_config={"pipeline": {"max_discount": 9}})
-    result = config.api_import_full(body)
+    from app.routes.config import ImportFullBody
+    body = ImportFullBody(app_config={"pipeline": {"max_discount": 9}})
+    result = config.restore_full_backup_unlocked(**body.model_dump())
 
     assert result["ok"] is True
     assert calls["validated"] == {"pipeline": {"max_discount": 9}}
+    # 未提供的 section 不应被写入；其余 section 的同一语义由
+    # test_full_credentials_import_holds_buff_auth_lock 的完整事件序列覆盖。
     assert calls["credentials"] == 0
-    assert calls["transactions"] == 0
-    assert calls["accounts"] == 0
-    assert calls["log"] == 0
 
 
 def test_full_credentials_import_holds_buff_auth_lock(monkeypatch):
-    from app.routes import config
+    from app.services import backup as config
     from app.services import buff_auth
 
     events = []
@@ -105,8 +116,10 @@ def test_full_credentials_import_holds_buff_auth_lock(monkeypatch):
     monkeypatch.setattr(config, "accounts_replace_all", lambda *args: None)
     monkeypatch.setattr(config, "replace_log", lambda *args: None)
 
-    body = config.ImportFullBody(credentials={"buff": {"cookies": "session=new"}})
-    result = config.api_import_full(body)
+    from app.routes import config as config_route
+    from app.routes.config import ImportFullBody
+    body = ImportFullBody(credentials={"buff": {"cookies": "session=new"}})
+    result = config_route.api_import_full(body)
 
     assert result["ok"] is True
     assert events == [
@@ -119,7 +132,7 @@ def test_full_credentials_import_holds_buff_auth_lock(monkeypatch):
 def test_full_import_explicit_empty_sections_clear_only_those_sections(
     monkeypatch,
 ):
-    from app.routes import config
+    from app.services import backup as config
 
     calls = []
     monkeypatch.setattr(
@@ -145,13 +158,14 @@ def test_full_import_explicit_empty_sections_clear_only_those_sections(
         lambda data: calls.append(("log", data)),
     )
 
-    result = config.api_import_full(
-        config.ImportFullBody(
+    from app.routes.config import ImportFullBody
+    result = config.restore_full_backup_unlocked(
+        **ImportFullBody(
             credentials={},
             transactions={},
             accounts={},
             log=[],
-        )
+        ).model_dump()
     )
 
     assert result["ok"] is True
@@ -161,3 +175,23 @@ def test_full_import_explicit_empty_sections_clear_only_those_sections(
         ("accounts", {}),
         ("log", []),
     ]
+
+
+def test_credentials_view_only_returns_editable_fields_without_cache(monkeypatch):
+    from fastapi import Response
+    from app.routes import config
+
+    monkeypatch.setattr(config, "get_steam_credentials", lambda: {
+        "cookies": "sessionid=example", "steam_id": "123", "session_id": "private",
+    })
+    monkeypatch.setattr(config, "get_buff_credentials", lambda: {
+        "cookies": "session=example", "user_agent": "Test Browser",
+        "generation": 4, "source": "manual",
+    })
+    response = Response()
+    result = config.api_get_credentials(response)
+    assert response.headers["cache-control"] == "no-store"
+    assert result == {
+        "steam": {"cookies": "sessionid=example", "steam_id": "123"},
+        "buff": {"cookies": "session=example", "user_agent": "Test Browser"},
+    }

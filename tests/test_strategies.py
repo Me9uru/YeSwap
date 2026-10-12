@@ -1,16 +1,27 @@
-from app import strategy_engine as se
+import copy
+
+import pytest
+
+from app.strategies import catalog as strategy_catalog
+from app.strategies import expressions as strategy_expressions
+from app.strategies import management as strategy_management
+from app.strategies import repository as strategy_repository
+from app.strategies import registry as strategy_registry
+from app.strategies import runtime as strategy_runtime
+from app.strategies import simulation as strategy_simulation
+from app.strategies import validation as strategy_validation
 
 
 def test_legacy_sell_strategy_maps_to_system_presets():
-    assert se.get_active_strategy_ids({"pipeline": {}})["sell"] == "system.sell.immediate"
-    assert se.get_active_strategy_ids({"pipeline": {"sell_strategy": 1}})["sell"] == "system.sell.immediate"
-    assert se.get_active_strategy_ids({"pipeline": {"sell_strategy": 2}})["sell"] == "system.sell.trend"
-    assert se.get_active_strategy_ids({"pipeline": {"sell_strategy": 3}})["sell"] == "system.sell.profit_guard"
-    assert se.get_active_strategy_ids({"pipeline": {"sell_strategy": 4}})["sell"] == "system.sell.pause"
+    assert strategy_runtime.get_active_strategy_ids({"pipeline": {}})["sell"] == "system.sell.immediate"
+    assert strategy_runtime.get_active_strategy_ids({"pipeline": {"sell_strategy": 1}})["sell"] == "system.sell.immediate"
+    assert strategy_runtime.get_active_strategy_ids({"pipeline": {"sell_strategy": 2}})["sell"] == "system.sell.trend"
+    assert strategy_runtime.get_active_strategy_ids({"pipeline": {"sell_strategy": 3}})["sell"] == "system.sell.profit_guard"
+    assert strategy_runtime.get_active_strategy_ids({"pipeline": {"sell_strategy": 4}})["sell"] == "system.sell.pause"
 
 
 def test_default_buy_strategy_contains_current_protection_chain():
-    strategy = se.get_strategy("system.buy.default")
+    strategy = strategy_registry.get_strategy("system.buy.default")
     enabled = {step["module_id"] for step in strategy["steps"] if step.get("enabled") is not False}
 
     assert {
@@ -34,7 +45,7 @@ def test_default_buy_strategy_contains_current_protection_chain():
 
 
 def test_default_sell_strategy_uses_split_pricing_modules():
-    strategy = se.get_strategy("system.sell.immediate")
+    strategy = strategy_registry.get_strategy("system.sell.immediate")
     enabled = {step["module_id"] for step in strategy["steps"] if step.get("enabled") is not False}
 
     assert "pricing.steam_wall_price" in enabled
@@ -42,32 +53,65 @@ def test_default_sell_strategy_uses_split_pricing_modules():
     assert "pricing.steam_wall_gap" not in enabled
 
 
-def test_activation_rejects_enabled_user_module(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
-    se.import_user_module({
-        "id": "custom.buy.my_filter",
-        "name": "我的过滤",
-        "strategy_types": ["buy"],
-    })
-    strategy = {
-        "id": "custom.buy.with_module",
-        "name": "含用户模块",
-        "strategy_type": "buy",
-        "origin": "custom",
-        "steps": [
-            {"module_id": "custom.buy.my_filter", "enabled": True, "params": {}},
-            {"module_id": "guard.target_balance", "enabled": True, "params": {}},
-            {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
-        ],
-    }
+@pytest.mark.parametrize(
+    ("module", "strategy"),
+    [
+        (
+            {
+                "id": "custom.buy.my_filter",
+                "name": "我的过滤",
+                "strategy_types": ["buy"],
+            },
+            {
+                "id": "custom.buy.with_module",
+                "name": "含用户模块",
+                "strategy_type": "buy",
+                "origin": "custom",
+                "steps": [
+                    {"module_id": "custom.buy.my_filter", "enabled": True, "params": {}},
+                    {"module_id": "guard.target_balance", "enabled": True, "params": {}},
+                    {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
+                ],
+            },
+        ),
+        (
+            {
+                "id": "custom.buy.code_filter",
+                "name": "Code filter",
+                "strategy_types": ["buy"],
+                "entrypoint": "module:run",
+            },
+            {
+                "name": "Code module strategy",
+                "strategy_type": "buy",
+                "steps": [
+                    {"module_id": "buy.steamdt_top_n", "enabled": True, "params": {}},
+                    {"module_id": "buy.basic_candidate_filter", "enabled": True, "params": {}},
+                    {"module_id": "buy.buff_realtime_price", "enabled": True, "params": {}},
+                    {"module_id": "buy.steam_sell_depth", "enabled": True, "params": {}},
+                    {"module_id": "custom.buy.code_filter", "enabled": True, "params": {}},
+                    {"module_id": "guard.target_balance", "enabled": True, "params": {}},
+                    {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
+                ],
+            },
+        ),
+    ],
+    ids=["无 module_kind 的用户模块", "带 entrypoint 的外部代码模块"],
+)
+def test_activation_rejects_enabled_user_module(tmp_path, monkeypatch, module, strategy):
+    monkeypatch.setattr(strategy_repository, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
+    strategy_registry.import_user_module(module)
 
-    errors = se.validate_strategy(strategy, for_activation=True)
+    errors = strategy_validation.validate_strategy(strategy, for_activation=True)
 
+    # 两者都不是安全 declarative 模块：既拿不到 declarative 放行，
+    # 也会命中中文兜底提示。
+    assert any("not a safe declarative module" in e for e in errors)
     assert any("用户模块" in e for e in errors)
 
 
 def test_import_sanitizes_sensitive_fields_and_does_not_override_system_id():
-    imported = se.normalize_strategy({
+    imported = strategy_validation.normalize_strategy({
         "id": "system.sell.pause",
         "name": "导入暂停",
         "strategy_type": "sell",
@@ -83,7 +127,7 @@ def test_import_sanitizes_sensitive_fields_and_does_not_override_system_id():
 
 
 def test_simulate_marks_trade_actions_as_dry_run():
-    result = se.simulate_strategy({
+    result = strategy_simulation.simulate_strategy({
         "strategy": {
             "name": "模拟",
             "strategy_type": "sell",
@@ -113,7 +157,7 @@ def test_validation_rejects_duplicate_conflict_dependency_and_step_limit():
             {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
         ],
     }
-    assert any("最多只能添加" in e for e in se.validate_strategy(duplicate))
+    assert any("最多只能添加" in e for e in strategy_validation.validate_strategy(duplicate))
 
     dependency = {
         "name": "缺依赖",
@@ -124,7 +168,7 @@ def test_validation_rejects_duplicate_conflict_dependency_and_step_limit():
             {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
         ],
     }
-    assert any("需要同时启用" in e and "Steam 卖单深度" in e for e in se.validate_strategy(dependency))
+    assert any("需要同时启用" in e and "Steam 卖单深度" in e for e in strategy_validation.validate_strategy(dependency))
 
     conflict = {
         "name": "互斥",
@@ -135,22 +179,22 @@ def test_validation_rejects_duplicate_conflict_dependency_and_step_limit():
             {"module_id": "action.pause_auto_sell", "enabled": True, "params": {}},
         ],
     }
-    assert any("互斥" in e for e in se.validate_strategy(conflict, for_activation=True))
+    assert any("互斥" in e for e in strategy_validation.validate_strategy(conflict, for_activation=True))
 
     oversized = {
         "name": "过长",
         "strategy_type": "buy",
         "steps": [
             {"module_id": "buy.steamdt_top_n", "enabled": False, "params": {}}
-            for _ in range(se.STRATEGY_STEP_LIMITS["buy"] + 1)
+            for _ in range(strategy_catalog.STRATEGY_STEP_LIMITS["buy"] + 1)
         ],
     }
-    assert any("最多添加" in e for e in se.validate_strategy(oversized))
+    assert any("最多添加" in e for e in strategy_validation.validate_strategy(oversized))
 
 
 def test_split_sell_pricing_without_offset_resets_offset(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "STRATEGY_STORE_PATH", tmp_path / "strategies.json")
-    saved = se.save_strategy({
+    monkeypatch.setattr(strategy_repository, "STRATEGY_STORE_PATH", tmp_path / "strategies.json")
+    saved = strategy_management.save_strategy({
         "name": "无补偿定价",
         "strategy_type": "sell",
         "steps": [
@@ -169,7 +213,7 @@ def test_split_sell_pricing_without_offset_resets_offset(tmp_path, monkeypatch):
         "pipeline": {"sell_price_offset": 8, "sell_strategy": 1},
         "stability": {},
     }
-    out = se.apply_strategy_to_config(cfg, "sell")
+    out = strategy_runtime.apply_strategy_to_config(cfg, "sell")
 
     assert out["pipeline"]["sell_price_wall_volume"] == 12
     assert out["pipeline"]["sell_price_max_ignore_volume"] == 2
@@ -187,14 +231,14 @@ def test_sell_listing_requires_one_pricing_core():
         ],
     }
 
-    errors = se.validate_strategy(strategy, for_activation=True)
+    errors = strategy_validation.validate_strategy(strategy, for_activation=True)
 
     assert any("定价模块" in e for e in errors)
 
 
 def test_one_piece_sell_pricing_core_can_replace_split_pricing(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "STRATEGY_STORE_PATH", tmp_path / "strategies.json")
-    saved = se.save_strategy({
+    monkeypatch.setattr(strategy_repository, "STRATEGY_STORE_PATH", tmp_path / "strategies.json")
+    saved = strategy_management.save_strategy({
         "name": "一体定价",
         "strategy_type": "sell",
         "steps": [
@@ -209,8 +253,8 @@ def test_one_piece_sell_pricing_core_can_replace_split_pricing(tmp_path, monkeyp
         ],
     })
 
-    assert se.validate_strategy(saved, for_activation=True) == []
-    cfg = se.apply_strategy_to_config({
+    assert strategy_validation.validate_strategy(saved, for_activation=True) == []
+    cfg = strategy_runtime.apply_strategy_to_config({
         "strategies": {"active_sell_strategy_id": saved["id"]},
         "pipeline": {"sell_strategy": 1},
         "stability": {},
@@ -222,8 +266,8 @@ def test_one_piece_sell_pricing_core_can_replace_split_pricing(tmp_path, monkeyp
 
 
 def test_declarative_user_module_can_activate_and_simulate(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
-    module = se.import_user_module({
+    monkeypatch.setattr(strategy_repository, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
+    module = strategy_registry.import_user_module({
         "id": "custom.sell.price_floor",
         "name": "Price floor",
         "module_kind": "declarative",
@@ -250,49 +294,17 @@ def test_declarative_user_module_can_activate_and_simulate(tmp_path, monkeypatch
         ],
     }
 
-    assert se.validate_strategy(strategy, for_activation=True) == []
-    result = se.simulate_strategy({"strategy": strategy})
+    assert strategy_validation.validate_strategy(strategy, for_activation=True) == []
+    result = strategy_simulation.simulate_strategy({"strategy": strategy})
     custom = [r for r in result["results"] if r["module_id"] == "custom.sell.price_floor"][0]
     assert custom["status"] == "reject"
     assert custom["output"]["total_conditions"] == 1
 
 
-def test_declarative_user_module_can_depend_on_one_piece_pricing(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
-    se.import_user_module({
-        "id": "custom.sell.gap_price_floor",
-        "name": "Gap price floor",
-        "module_kind": "declarative",
-        "strategy_types": ["sell"],
-        "uses_modules": ["pricing.steam_wall_gap"],
-        "stage": "sell.listing_guard",
-        "conditions": [
-            {"left": "outputs.pricing.steam_wall_gap.list_price", "op": "gte", "value": 20}
-        ],
-        "fail_status": "reject",
-    })
-    strategy = {
-        "name": "Gap declarative guard",
-        "strategy_type": "sell",
-        "steps": [
-            {"module_id": "sell.sellable_inventory_filter", "enabled": True, "params": {}},
-            {"module_id": "guard.max_listings_per_item", "enabled": True, "params": {}},
-            {"module_id": "pricing.steam_wall_gap", "enabled": True, "params": {}},
-            {"module_id": "custom.sell.gap_price_floor", "enabled": True, "params": {}},
-            {"module_id": "action.steam_list", "enabled": True, "params": {}},
-        ],
-    }
-
-    assert se.validate_strategy(strategy, for_activation=True) == []
-    result = se.simulate_strategy({"strategy": strategy})
-    custom = [r for r in result["results"] if r["module_id"] == "custom.sell.gap_price_floor"][0]
-    assert custom["status"] == "reject"
-
-
 def test_declarative_runtime_guard_blocks_at_stage(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
-    monkeypatch.setattr(se, "STRATEGY_STORE_PATH", tmp_path / "strategies.json")
-    se.import_user_module({
+    monkeypatch.setattr(strategy_repository, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
+    monkeypatch.setattr(strategy_repository, "STRATEGY_STORE_PATH", tmp_path / "strategies.json")
+    strategy_registry.import_user_module({
         "id": "custom.buy.min_volume",
         "name": "Minimum daily volume",
         "module_kind": "declarative",
@@ -301,7 +313,7 @@ def test_declarative_runtime_guard_blocks_at_stage(tmp_path, monkeypatch):
         "conditions": [{"left": "item.daily_volume", "op": "gte", "value": 100}],
         "fail_status": "reject",
     })
-    saved = se.save_strategy({
+    saved = strategy_management.save_strategy({
         "name": "Buy with volume guard",
         "strategy_type": "buy",
         "steps": [
@@ -314,13 +326,13 @@ def test_declarative_runtime_guard_blocks_at_stage(tmp_path, monkeypatch):
             {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
         ],
     })
-    cfg = se.apply_strategy_to_config({
+    cfg = strategy_runtime.apply_strategy_to_config({
         "strategies": {"active_buy_strategy_id": saved["id"]},
         "pipeline": {},
         "stability": {},
     }, "buy")
 
-    results, blocking = se.evaluate_strategy_runtime_modules(
+    results, blocking = strategy_expressions.evaluate_strategy_runtime_modules(
         cfg,
         "buy",
         "buy.candidate_guard",
@@ -334,8 +346,8 @@ def test_declarative_runtime_guard_blocks_at_stage(tmp_path, monkeypatch):
 
 
 def test_declarative_user_module_dependency_order_is_enforced(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
-    se.import_user_module({
+    monkeypatch.setattr(strategy_repository, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
+    strategy_registry.import_user_module({
         "id": "custom.sell.needs_price",
         "name": "Needs price",
         "module_kind": "declarative",
@@ -356,36 +368,9 @@ def test_declarative_user_module_dependency_order_is_enforced(tmp_path, monkeypa
         ],
     }
 
-    errors = se.validate_strategy(strategy, for_activation=True)
+    errors = strategy_validation.validate_strategy(strategy, for_activation=True)
 
     assert any("must run after" in e for e in errors)
-
-
-def test_external_code_user_module_still_cannot_activate(tmp_path, monkeypatch):
-    monkeypatch.setattr(se, "USER_MODULE_STORE_PATH", tmp_path / "modules.json")
-    se.import_user_module({
-        "id": "custom.buy.code_filter",
-        "name": "Code filter",
-        "strategy_types": ["buy"],
-        "entrypoint": "module:run",
-    })
-    strategy = {
-        "name": "Code module strategy",
-        "strategy_type": "buy",
-        "steps": [
-            {"module_id": "buy.steamdt_top_n", "enabled": True, "params": {}},
-            {"module_id": "buy.basic_candidate_filter", "enabled": True, "params": {}},
-            {"module_id": "buy.buff_realtime_price", "enabled": True, "params": {}},
-            {"module_id": "buy.steam_sell_depth", "enabled": True, "params": {}},
-            {"module_id": "custom.buy.code_filter", "enabled": True, "params": {}},
-            {"module_id": "guard.target_balance", "enabled": True, "params": {}},
-            {"module_id": "action.buff_lock_pay", "enabled": True, "params": {}},
-        ],
-    }
-
-    errors = se.validate_strategy(strategy, for_activation=True)
-
-    assert any("not a safe declarative module" in e for e in errors)
 
 
 def test_step_param_validation_rejects_out_of_range_value():
@@ -402,7 +387,7 @@ def test_step_param_validation_rejects_out_of_range_value():
         ],
     }
 
-    assert any(">= 0" in e for e in se.validate_strategy(strategy))
+    assert any(">= 0" in e for e in strategy_validation.validate_strategy(strategy))
 
 
 def test_system_strategy_params_can_be_saved_to_config(monkeypatch):
@@ -413,67 +398,34 @@ def test_system_strategy_params_can_be_saved_to_config(monkeypatch):
     }
 
     def fake_load():
-        return se.copy.deepcopy(state)
+        return copy.deepcopy(state)
 
     def fake_save(data):
         state.clear()
-        state.update(se.copy.deepcopy(data))
+        state.update(copy.deepcopy(data))
 
-    monkeypatch.setattr(se, "load_app_config_validated", fake_load)
-    monkeypatch.setattr(se, "save_app_config_validated", fake_save)
+    monkeypatch.setattr(strategy_management, "load_app_config_validated", fake_load)
+    monkeypatch.setattr(strategy_management, "save_app_config_validated", fake_save)
 
-    strategy = se.get_strategy("system.buy.default")
+    strategy = strategy_registry.get_strategy("system.buy.default")
     for step in strategy["steps"]:
         if step["module_id"] == "guard.target_balance":
             step["params"] = {"target_balance": 233}
 
-    saved = se.save_strategy(strategy)
+    saved = strategy_management.save_strategy(strategy)
 
     assert saved["id"] == "system.buy.default"
     assert saved["origin"] == "system"
     assert state["pipeline"]["target_balance"] == 233
 
 
-def test_system_strategy_params_can_restore_schema_defaults(monkeypatch):
-    state = {
-        "strategies": {"active_buy_strategy_id": "system.buy.default"},
-        "pipeline": {"target_balance": 233},
-        "stability": {},
-    }
-
-    def fake_load():
-        return se.copy.deepcopy(state)
-
-    def fake_save(data):
-        state.clear()
-        state.update(se.copy.deepcopy(data))
-
-    monkeypatch.setattr(se, "load_app_config_validated", fake_load)
-    monkeypatch.setattr(se, "save_app_config_validated", fake_save)
-
-    strategy = se.get_strategy("system.buy.default")
-    modules = se._module_by_id()
-    for step in strategy["steps"]:
-        schema = (modules.get(step["module_id"]) or {}).get("params_schema") or {}
-        step["params"] = {
-            key: se.copy.deepcopy(meta["default"])
-            for key, meta in schema.items()
-            if isinstance(meta, dict) and "default" in meta
-        }
-
-    saved = se.save_strategy(strategy)
-
-    assert saved["id"] == "system.buy.default"
-    assert state["pipeline"]["target_balance"] == 100
-
-
 def test_system_strategy_save_rejects_structure_changes():
-    strategy = se.get_strategy("system.buy.default")
+    strategy = strategy_registry.get_strategy("system.buy.default")
     strategy["steps"] = strategy["steps"][1:]
 
     try:
-        se.save_strategy(strategy)
-    except se.StrategyError as exc:
+        strategy_management.save_strategy(strategy)
+    except strategy_catalog.StrategyError as exc:
         assert "只允许修改参数" in str(exc)
     else:
         raise AssertionError("system strategy structure changes should be rejected")

@@ -9,16 +9,15 @@ import time
 from typing import Optional, Tuple
 import urllib3
 import requests as _req
-from app.state import log
-from app.config_loader import (
+from app.runtime.state import log
+from app.configuration.repository import (
     get_steam_credentials,
     load_app_config_validated,
     update_steam_creds,
 )
-from app.accounts import (
+from app.accounts.repository import (
     get_account,
     get_current_account,
-    get_profile_dir,
     set_current,
     update_account,
 )
@@ -343,7 +342,6 @@ def _do_steampy_login_once(
     Returns (ok, error_code, cookie_dict).
     """
     import json
-    import requests as _req
     import requests.utils as rutils
     import urllib3
     urllib3.disable_warnings()
@@ -619,7 +617,7 @@ def _try_steam_auto_relogin_impl() -> tuple:
     if err_code == "wrong_creds":
         log("auto_relogin: 账号或密码错误", "warn", category="steam")
         try:
-            from app.notify import notify_manual_intervention_required
+            from app.notifications.service import notify_manual_intervention_required
             notify_manual_intervention_required("Steam", "系统保存的账号或密码不正确，登录被拒绝，请立刻前往修改密码并手动干预登录")
         except Exception:
             pass
@@ -627,7 +625,7 @@ def _try_steam_auto_relogin_impl() -> tuple:
     if err_code == "need_2fa":
         log("auto_relogin: 需要 2FA 但无 shared_secret 或令牌有误", "warn", category="steam")
         try:
-            from app.notify import notify_manual_intervention_required
+            from app.notifications.service import notify_manual_intervention_required
             notify_manual_intervention_required("Steam", "账号需要 2FA 验证，但 shared_secret 未配置或格式有误，请前往设置页补充 Steam Guard 密钥")
         except Exception:
             pass

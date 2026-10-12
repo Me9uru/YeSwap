@@ -1,8 +1,8 @@
 import time
 from typing import Optional
 
-from app.accounts import get_account, get_current_account, update_account
-from app.config_loader import get_steam_credentials
+from app.accounts.repository import get_account, get_current_account, update_account
+from app.configuration.repository import get_steam_credentials
 from app.services.steam_auth import steam_id_from_cookie_str
 
 _SETTLEMENT_CURRENCY_REGION = {
@@ -93,7 +93,7 @@ def refresh_account_region_currency(
         if expected_steam_id and actual_steam_id and expected_steam_id != actual_steam_id:
             raise RuntimeError("当前账号与已保存的 Steam Cookie 不一致，请重新验证当前账号或重新登录 Steam")
 
-        from app.gift_engine import get_wallet_balance
+        from steam.account import get_wallet_balance
 
         wallet = get_wallet_balance(cookies)
         currency_code = (wallet.get("currency_code") or "").strip().upper()

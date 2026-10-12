@@ -7,10 +7,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _prepare_repair(monkeypatch, tmp_path, purchases, *, inventory=None, sold=None, sold_names=None, listings=None, listing_names=None):
-    from app import repair_error_records
-    from app import inventory_cs2
-    from app import steam_listings
-    from app import state
+    from app.maintenance import repair_records as repair_error_records
+    from app.steam_market import inventory as inventory_cs2
+    from app.steam_market import listings as steam_listings
+    from app.runtime import state
 
     credentials_file = tmp_path / "credentials.json"
     credentials_file.write_text(
@@ -190,7 +190,7 @@ def test_rebuild_keeps_pending_receipt_when_not_seen_anywhere(monkeypatch, tmp_p
 
 
 def test_fetch_sold_with_names_paginates_history(monkeypatch):
-    from app import repair_error_records
+    from app.maintenance import repair_records as repair_error_records
 
     calls = []
 

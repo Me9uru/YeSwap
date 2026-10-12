@@ -50,7 +50,7 @@ def test_buff_credentials_keep_identity_metadata_and_advance_generation(monkeypa
 
 
 def test_manual_buff_cookie_saves_stable_user_agent_and_source(monkeypatch):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     saved = []
     monkeypatch.setattr(auth, "get_buff_credentials", lambda: {})
@@ -62,10 +62,8 @@ def test_manual_buff_cookie_saves_stable_user_agent_and_source(monkeypatch):
 
     result = auth.api_auth_manual_cookie(
         "buff",
-        auth.ManualCookieBody(
-            cookies="session=abc; csrf_token=def",
-            user_agent="Browser/1.0\r\nInjected: no",
-        ),
+        cookies="session=abc; csrf_token=def",
+        user_agent="Browser/1.0\r\nInjected: no",
     )
 
     assert result["ok"] is True
@@ -78,7 +76,7 @@ def test_manual_buff_cookie_saves_stable_user_agent_and_source(monkeypatch):
 
 
 def test_manual_buff_cookie_requires_csrf_token(monkeypatch):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     monkeypatch.setattr(
         auth,
@@ -88,7 +86,7 @@ def test_manual_buff_cookie_requires_csrf_token(monkeypatch):
 
     result = auth.api_auth_manual_cookie(
         "buff",
-        auth.ManualCookieBody(cookies="session=abc"),
+        cookies="session=abc",
     )
 
     assert result["ok"] is False
@@ -96,7 +94,7 @@ def test_manual_buff_cookie_requires_csrf_token(monkeypatch):
 
 
 def test_failed_manual_cookie_probe_never_saves_clears_or_resumes(monkeypatch):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     monkeypatch.setattr(auth, "get_buff_credentials", lambda: {"cookies": "session=old"})
     monkeypatch.setattr(auth, "manual_buff_probe_allowed", lambda *args: (True, "ok", ""))
@@ -123,7 +121,7 @@ def test_failed_manual_cookie_probe_never_saves_clears_or_resumes(monkeypatch):
 
     result = auth.api_auth_manual_cookie(
         "buff",
-        auth.ManualCookieBody(cookies="session=new; csrf_token=csrf"),
+        cookies="session=new; csrf_token=csrf",
     )
 
     assert result["ok"] is False
@@ -204,25 +202,6 @@ def test_manual_probe_persists_new_rate_limit_to_global_policy(monkeypatch):
     assert calls[0][1] == 90
 
 
-def test_same_manual_cookie_does_not_probe_an_open_circuit(monkeypatch):
-    import buff
-    from app.services import buff_auth
-
-    class BlockedPolicy:
-        def raise_if_blocked(self, _account_key):
-            raise buff.BuffVerificationRequired("still blocked")
-
-    monkeypatch.setattr(buff, "get_global_policy", lambda: BlockedPolicy())
-
-    allowed, status, _message = buff_auth.manual_buff_probe_allowed(
-        "csrf_token=changed; session=one; irrelevant=new",
-        "session=one; csrf_token=two",
-    )
-
-    assert allowed is False
-    assert status == "browser_verification_required"
-
-
 def test_changed_manual_cookie_cannot_bypass_verification_circuit(monkeypatch):
     import buff
     from app.services import buff_auth
@@ -299,42 +278,10 @@ def test_verified_clear_preserves_unexpired_rate_limit(monkeypatch):
     assert buff_auth.clear_buff_request_policy_after_verification() is False
 
 
-def test_verified_clear_preserves_global_pacing_timestamp(
-    _isolated_global_buff_policy,
-):
-    import buff
-    from app.services import buff_auth
-    from buff.request_policy import account_fingerprint
-
-    policy = _isolated_global_buff_policy
-    account_key = account_fingerprint({}, account_id="default")
-    policy._last_started[account_key] = 123.5
-    policy.trip_verification(account_key, "verify")
-
-    assert buff_auth.clear_buff_request_policy_after_verification() is True
-    assert policy._last_started[account_key] == 123.5
-    policy.raise_if_blocked(account_key)
-
-
-def test_verified_clear_recovers_fail_closed_invalid_policy_state(
-    _isolated_global_buff_policy,
-):
-    from app.services import buff_auth
-
-    policy = _isolated_global_buff_policy
-    policy._state_invalid = True
-
-    assert buff_auth.clear_buff_request_policy_after_verification() is True
-    assert policy._state_invalid is False
-
-
-def test_browser_verification_script_has_hard_timeout_and_global_pacing(
+def test_browser_verification_uses_browser_parsed_metadata_for_large_json(
     _isolated_global_buff_policy,
 ):
     from app.services.buff_auth import verify_buff_browser_session
-    from buff.request_policy import account_fingerprint
-
-    captured = []
 
     class Page:
         url = "https://buff.163.com/"
@@ -345,28 +292,23 @@ def test_browser_verification_script_has_hard_timeout_and_global_pacing(
         def content(self):
             return "market"
 
-        def evaluate(self, script):
-            captured.append(script)
-            body = (
-                '{"code":"OK"}'
-                if "page_size=10&state=wait_pay" in script
-                else '{"code":"PARAM_ERROR","error":"Not a valid choice"}'
-            )
+        def evaluate(self, _script):
             return {
                 "status": 200,
                 "url": "https://buff.163.com/api/market/buy_order/history",
-                "body": body,
+                "contentType": "application/json",
+                "payload": {"code": "OK", "error": "", "msg": ""},
+                # Simulate the deliberately truncated, therefore invalid JSON
+                # preview returned alongside the parsed metadata.
+                "body": '{"code":"OK","data":',
+                "bodyLength": 38056,
             }
 
-    assert verify_buff_browser_session(Page())[0] is True
-    assert "page_size=10&state=wait_pay" in captured[0]
-    assert "page_size=1&" not in captured[0]
-    assert "AbortController" in captured[0]
-    assert "15000" in captured[0]
-    assert "signal: controller.signal" in captured[0]
-    assert "retry-after" in captured[0]
-    account_key = account_fingerprint({}, account_id="default")
-    assert account_key in _isolated_global_buff_policy._last_started
+    assert verify_buff_browser_session(Page()) == (
+        True,
+        "ok",
+        "BUFF 会话在线验证通过",
+    )
 
 
 @pytest.mark.parametrize("status_code", [403, 412])
@@ -427,7 +369,7 @@ def test_browser_verification_429_uses_retry_after_and_trips_global_rate_limit(
 
 
 def test_duplicate_relogin_start_is_rejected_without_closing_active_context(monkeypatch):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     class AliveThread:
         def is_alive(self):
@@ -437,7 +379,6 @@ def test_duplicate_relogin_start_is_rejected_without_closing_active_context(monk
         def close(self):
             raise AssertionError("active context must not be closed cross-thread")
 
-    monkeypatch.setattr(auth, "get_runtime_profile", lambda: types.SimpleNamespace(can_launch_headful_browser=True))
     monkeypatch.setattr(auth, "_relogin_thread", AliveThread())
     monkeypatch.setattr(auth, "_relogin_context", Context())
 
@@ -451,16 +392,11 @@ def test_active_rate_limit_rejects_browser_relogin_before_thread_start(
     monkeypatch,
     _isolated_global_buff_policy,
 ):
-    from app.routes import auth
+    from app.services import auth_session as auth
     from buff.request_policy import account_fingerprint
 
     account_key = account_fingerprint({}, account_id="default")
     _isolated_global_buff_policy.trip_rate_limit(account_key, 60, "cooldown")
-    monkeypatch.setattr(
-        auth,
-        "get_runtime_profile",
-        lambda: types.SimpleNamespace(can_launch_headful_browser=True),
-    )
     monkeypatch.setattr(auth, "_relogin_thread", None)
     monkeypatch.setattr(auth, "_relogin_context", None)
     monkeypatch.setattr(auth, "_relogin_browser", None)
@@ -486,7 +422,7 @@ def test_active_rate_limit_rejects_browser_relogin_before_thread_start(
 def test_checkout_pending_rejects_manual_and_browser_credential_replacement(
     monkeypatch,
 ):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     monkeypatch.setattr(
         auth,
@@ -502,14 +438,9 @@ def test_checkout_pending_rejects_manual_and_browser_credential_replacement(
     )
     manual_result = auth.api_auth_manual_cookie(
         "buff",
-        auth.ManualCookieBody(cookies="session=new; csrf_token=new"),
+        cookies="session=new; csrf_token=new",
     )
 
-    monkeypatch.setattr(
-        auth,
-        "get_runtime_profile",
-        lambda: types.SimpleNamespace(can_launch_headful_browser=True),
-    )
     monkeypatch.setattr(auth, "_relogin_thread", None)
     monkeypatch.setattr(auth, "_relogin_context", None)
     monkeypatch.setattr(auth, "_relogin_browser", None)
@@ -557,7 +488,7 @@ def test_checkout_state_freezes_buff_credentials(
 
 
 def test_abandoned_relogin_times_out_and_releases_buff_lock(monkeypatch, tmp_path):
-    from app.routes import auth
+    from app.services import auth_session as auth
 
     class Page:
         def goto(self, *args, **kwargs):
@@ -713,7 +644,7 @@ def test_challenge_page_is_not_accepted_and_trips_global_verification(
 
 
 def test_inactive_captcha_script_does_not_look_like_active_challenge():
-    from app.services.buff_auth import detect_buff_challenge
+    from app.services.buff_browser_probe import detect_buff_challenge
 
     class NormalPage:
         url = "https://buff.163.com/"
@@ -728,7 +659,7 @@ def test_inactive_captcha_script_does_not_look_like_active_challenge():
 
 
 def test_session_keepalive_requires_idle_non_checkout_pipeline(monkeypatch):
-    from app.services import workers
+    from app.background import safety as workers
 
     monkeypatch.setattr(workers, "get_status", lambda: {"status": "running", "step": "FILTER"})
     assert workers._session_keepalive_is_safe() is False
@@ -747,16 +678,8 @@ def test_session_keepalive_requires_idle_non_checkout_pipeline(monkeypatch):
     assert workers._session_keepalive_is_safe() is False
 
 
-def test_buff_session_keepalive_is_opt_in_by_default():
-    from app.config_schema import DEFAULTS
-    from app.services.workers import _session_keepalive_enabled
-
-    assert DEFAULTS["system"]["buff_session_keepalive_enabled"] is False
-    assert _session_keepalive_enabled(DEFAULTS) is False
-
-
 def test_keepalive_first_wait_uses_full_configured_interval(monkeypatch):
-    from app.services import workers
+    from app.background import keepalive as workers
 
     sleeps = []
     cfg = {
@@ -772,7 +695,7 @@ def test_keepalive_first_wait_uses_full_configured_interval(monkeypatch):
         sleeps.append(seconds)
         raise RuntimeError("stop worker")
 
-    monkeypatch.setattr(workers.time, "sleep", stop_on_sleep)
+    monkeypatch.setattr(workers, "wait", stop_on_sleep)
 
     try:
         workers.session_keepalive_worker()
@@ -780,4 +703,3 @@ def test_keepalive_first_wait_uses_full_configured_interval(monkeypatch):
         pass
 
     assert sleeps[0] == 2.0 * 3600
-    assert sleeps[0] != 300

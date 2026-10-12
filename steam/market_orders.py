@@ -1,3 +1,4 @@
+from utils.paths import DATA_DIR
 import re
 import threading
 import time
@@ -12,7 +13,15 @@ from steam.client import build_listing_url
 from utils.delay import jittered_sleep
 from utils.proxy_manager import get_proxy_manager
 from utils.money import USD_TO_CNY_DEFAULT
-from app.database import db_get_item_nameid, db_set_item_nameid
+# Persistent cache is supplied by the application; the adapter also works alone.
+_read_nameid = lambda name: None
+_write_nameid = lambda name, value: None
+
+
+def configure_nameid_cache(read, write) -> None:
+    global _read_nameid, _write_nameid
+    _read_nameid, _write_nameid = read, write
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +40,7 @@ CURRENCY_CNY = 23
 STEAM_CURRENCY_USD = 1
 STEAM_CURRENCY_CNY = 23
 _ROOT = Path(__file__).resolve().parent.parent
-_EXCHANGE_RATE_FILE = _ROOT / "config" / "exchange_rate.json"
+_EXCHANGE_RATE_FILE = DATA_DIR / "exchange_rate.json"
 _STEAM_CURRENCY_CODES = {
     1: "USD",
     2: "GBP",
@@ -517,12 +526,30 @@ def _fetch_action_orderbook_cny(
                 if not isinstance(payload, dict):
                     last_error = "Steam 新版 orderbook 接口返回格式异常"
                     break
-                if payload.get("success") not in (True, 1, "1"):
-                    msg = payload.get("message") or payload.get("error") or ""
+                # Steam's current queryAction response wraps the previous
+                # orderbook payload in ``data``: {"data": {"success":
+                # true, "data": {...}}}.  Keep accepting the former flat
+                # shape as well so both deployments work.
+                orderbook_payload = payload
+                nested_payload = payload.get("data")
+                if (
+                    payload.get("success") not in (True, 1, "1")
+                    and isinstance(nested_payload, dict)
+                    and "success" in nested_payload
+                ):
+                    orderbook_payload = nested_payload
+                if orderbook_payload.get("success") not in (True, 1, "1"):
+                    msg = (
+                        orderbook_payload.get("message")
+                        or orderbook_payload.get("error")
+                        or payload.get("message")
+                        or payload.get("error")
+                        or ""
+                    )
                     last_error = "Steam 新版 orderbook 接口返回失败" + (f": {msg}" if msg else "")
                     break
                 result, parse_error = _compact_orderbook_data_to_cny(
-                    payload.get("data"),
+                    orderbook_payload.get("data"),
                     source="Steam 新版 orderbook 接口",
                     usd_to_cny_rate=usd_to_cny_rate,
                 )
@@ -547,7 +574,7 @@ def get_item_nameid(
     return_error: bool = False,
 ):
     key = (market_hash_name.strip(), app_id)
-    db_nameid = db_get_item_nameid(key[0])
+    db_nameid = _read_nameid(key[0])
     if db_nameid:
         return (db_nameid, None) if return_error else db_nameid
     if use_cache:
@@ -570,7 +597,7 @@ def get_item_nameid(
             if r.status_code == 200:
                 nameid = _extract_item_nameid(r.text)
                 if nameid:
-                    db_set_item_nameid(key[0], nameid)
+                    _write_nameid(key[0], nameid)
                     if use_cache:
                         with _item_nameid_cache_lock:
                             _item_nameid_cache[key] = (nameid, time.time() + _ITEM_NAMEID_TTL)
@@ -742,7 +769,7 @@ def get_sell_orders_cny(
     item_nameid = None
     nameid_error = None
     if use_cache:
-        item_nameid = db_get_item_nameid(key[0])
+        item_nameid = _read_nameid(key[0])
         if not item_nameid:
             with _item_nameid_cache_lock:
                 entry = _item_nameid_cache.get(key)

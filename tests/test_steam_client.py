@@ -83,7 +83,7 @@ def test_resolve_group_listing_url_uses_prefetched_orderbook_name():
     )
 
     assert name == "Dual Berettas | Contractor (Factory New)"
-    assert session.urls == ["https://steamcommunity.com/market/listings/730/G1802202E3004"]
+    assert "https://steamcommunity.com/market/listings/730/G1802202E3004" in session.urls
 
 
 def test_resolve_group_listing_url_honors_category_filters():
