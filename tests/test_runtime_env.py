@@ -1,7 +1,3 @@
-import ast
-import tomllib
-from pathlib import Path
-
 from app.runtime_env import (
     get_bind_host,
     get_browser_channel,
@@ -11,33 +7,25 @@ from app.runtime_env import (
 )
 
 
-def test_web_runtime_does_not_depend_on_desktop_shell():
-    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    dependencies = data["project"]["dependencies"]
-    tree = ast.parse(Path("app/main.py").read_text(encoding="utf-8"))
-    imported_modules = {
-        node.names[0].name.split(".", 1)[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import) and node.names
-    }
-
-    assert not any(dependency.lower().startswith("pywebview") for dependency in dependencies)
-    assert imported_modules.isdisjoint({"webview", "webbrowser"})
-    assert "optional-dependencies" not in data["project"]
-
-
-def test_main_starts_uvicorn_without_opening_a_desktop_window(monkeypatch, capsys):
+def test_main_refreshes_bundle_then_serves_uvicorn(monkeypatch, capsys):
     import app.main as main_module
 
-    calls = []
+    events = []
     monkeypatch.setattr(main_module, "get_bind_host", lambda: "0.0.0.0")
     monkeypatch.setattr(main_module, "get_port", lambda: 3000)
-    monkeypatch.setattr(main_module, "build_web_if_stale", lambda: None)
-    monkeypatch.setattr(main_module.uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
+    monkeypatch.setattr(main_module, "build_web_if_stale", lambda: events.append("build"))
+    monkeypatch.setattr(
+        main_module.uvicorn,
+        "run",
+        lambda *args, **kwargs: events.append(("serve", args, kwargs)),
+    )
 
     main_module.main()
 
-    assert calls == [(("app.api:app",), {"host": "0.0.0.0", "port": 3000, "log_level": "warning"})]
+    assert events == [
+        "build",
+        ("serve", ("app.api:app",), {"host": "0.0.0.0", "port": 3000, "log_level": "warning"}),
+    ]
     assert "http://127.0.0.1:3000" in capsys.readouterr().out
 
 

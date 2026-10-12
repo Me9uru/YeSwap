@@ -3,6 +3,7 @@ from typing import Optional
 
 from app.accounts.repository import get_account, get_current_account, update_account
 from app.configuration.repository import get_steam_credentials
+from app.runtime.state import log
 from app.services.steam_auth import steam_id_from_cookie_str
 
 _SETTLEMENT_CURRENCY_REGION = {
@@ -57,6 +58,40 @@ def _region_from_settlement_currency(currency_code: str, wallet_country: str = "
     return _SETTLEMENT_CURRENCY_REGION.get(currency) or country
 
 
+def _recover_steam_session(failed_cookies: str) -> Optional[str]:
+    """钱包查询失败后尝试恢复登录态，返回重试用的 Cookie；无法恢复时返回 None。
+
+    steamLoginSecure 是约 24 小时过期的 JWT，应用离线一段时间后启动时必然可能
+    撞上失效凭据。只有探测结果明确为"未登录"才触发一次自动重登——网络异常等
+    无法判定（None）的情况不启动密码登录。其他流程可能已重登并更新了存储凭据，
+    此时直接复用，避免重复登录。
+    """
+    from steam.session import build_steam_session, check_login_state
+
+    def _probe(cookie_str: str) -> Optional[bool]:
+        if not cookie_str or "steamLoginSecure" not in cookie_str:
+            return None
+        try:
+            return check_login_state(build_steam_session(cookies=cookie_str))
+        except Exception:
+            return None
+
+    failed = (failed_cookies or "").strip()
+    stored = (get_steam_credentials().get("cookies") or "").strip()
+    if stored and stored != failed and _probe(stored) is True:
+        return stored
+    if _probe(failed) is not False:
+        return None
+    log("account_region: 检测到 Steam 登录态已失效，先自动重登再重试", "info", category="steam")
+    from app.services.steam_auth import try_steam_auto_relogin
+
+    ok, _status, _message = try_steam_auto_relogin()
+    if not ok:
+        return None
+    refreshed = (get_steam_credentials().get("cookies") or "").strip()
+    return refreshed or None
+
+
 def refresh_account_region_currency(
     account_id: Optional[str] = None,
     *,
@@ -95,7 +130,14 @@ def refresh_account_region_currency(
 
         from steam.account import get_wallet_balance
 
-        wallet = get_wallet_balance(cookies)
+        try:
+            wallet = get_wallet_balance(cookies)
+        except Exception:
+            recovered = _recover_steam_session(cookies)
+            if not recovered:
+                raise
+            cookies = recovered
+            wallet = get_wallet_balance(cookies)
         currency_code = (wallet.get("currency_code") or "").strip().upper()
         if not currency_code:
             raise RuntimeError("Steam 未返回钱包结算币种")

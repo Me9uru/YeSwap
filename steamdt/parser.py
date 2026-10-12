@@ -48,13 +48,8 @@ def parse_response(result: dict, target_platform: str = "BUFF") -> List[SteamDTR
             min_price=str(price),
             sell_ratio=str(sell_rate or 0),
             buy_ratio=str(purchase_rate or 0),
-            safe_buy_ratio=str(purchase_rate or sell_rate or 0), 
-            recent_ratio=str(sell_rate or 0),      
             platform=buff_link,
             steam_link=steam_link,
-            update_time=str(item.get("updateTime", "")),
             name_cn=item.get("name", ""),
-            steam_price=float(item.get("steamPrice", 0) or 0),
-            profit_amount=float(item.get("profitAmount", 0) or 0),
         ))
     return rows

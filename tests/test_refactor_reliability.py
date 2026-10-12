@@ -2,7 +2,7 @@ import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-from app.strategies import management, registry, repository, simulation
+from app.strategies import management, registry, simulation
 from app.services import lifecycle
 
 
@@ -18,7 +18,7 @@ def test_concurrent_strategy_saves_preserve_all_records():
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         saved = set(executor.map(save, range(8)))
-    assert {s["id"] for s in repository._strategy_store()["strategies"]} == saved
+    assert {s["id"] for s in registry.list_custom_strategies()} == saved
 
 
 def test_discount_simulation_uses_submitted_threshold():
@@ -85,9 +85,6 @@ def test_atomic_strategy_write_keeps_previous_file_on_failure(monkeypatch, tmp_p
 def test_price_cleanup_and_percentile_keep_numeric_semantics(monkeypatch):
     from analysis import stability
 
-    assert stability._percentile([], 50) == 0
-    assert stability._percentile([10], 50) == 10
-    assert stability._percentile([1, 2, 3, 4], 50) == 2.5
     assert stability.clean_prices_iqr([10, 10, 10, 10, 1000]) == [10, 10, 10, 10]
     monkeypatch.setattr(stability, "_iqr_bounds", lambda _prices: (100, 200))
     assert stability.clean_prices_iqr([1, 2, 3, 4, 5]) == [2, 3, 4]

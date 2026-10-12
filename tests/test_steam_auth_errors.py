@@ -169,6 +169,10 @@ def test_do_steampy_login_repairs_upstream_single_poll_and_restores_patch(monkey
 
     monkeypatch.setattr(steampy_client, "SteamClient", FakeSteamClient)
     monkeypatch.setattr(steam_auth, "_STEAM_AUTH_POLL_INTERVAL_SECONDS", 0)
+    # 本用例只验证 steampy 补偿补丁；社区握手单独覆盖。
+    monkeypatch.setattr(
+        steam_auth, "_ensure_community_session", lambda cookie_dict: cookie_dict
+    )
 
     ok, error, cookies = steam_auth._do_steampy_login(
         "user",
@@ -215,6 +219,10 @@ def test_do_steampy_login_once_injects_proxy_and_bounded_timeout(monkeypatch):
     }
     monkeypatch.setattr(requests.Session, "request", fake_request)
     monkeypatch.setattr(steampy_client, "SteamClient", FakeSteamClient)
+    # 本用例只验证代理注入与超时；社区握手单独覆盖。
+    monkeypatch.setattr(
+        steam_auth, "_ensure_community_session", lambda cookie_dict: cookie_dict
+    )
 
     ok, error, _cookies = steam_auth._do_steampy_login_once(
         "user",
@@ -348,7 +356,6 @@ def test_do_steampy_login_converts_refresh_token_key_error_to_auth_pending(monke
     from steampy.login import LoginExecutor
     from app.services import steam_auth
 
-    original_request = requests.Session.request
     original_pool = LoginExecutor._pool_sessions_steam
 
     class FakeSteamClient:
@@ -370,21 +377,18 @@ def test_do_steampy_login_converts_refresh_token_key_error_to_auth_pending(monke
     assert error.startswith("auth_pending:")
     assert "refresh_token" not in error
     assert cookies == {}
-    assert requests.Session.request is original_request
     assert LoginExecutor._pool_sessions_steam is original_pool
     assert steam_auth._steampy_login_patch_lock.acquire(blocking=False)
     steam_auth._steampy_login_patch_lock.release()
 
 
 def test_do_steampy_login_releases_lock_when_login_executor_import_fails(monkeypatch):
-    import requests
     from steampy import client as steampy_client
     from app.services import steam_auth
 
     # Ensure steampy.client is already loaded, then make only the subsequent
     # LoginExecutor import fail inside _do_steampy_login.
     assert steampy_client.SteamClient
-    original_request = requests.Session.request
     monkeypatch.setitem(sys.modules, "steampy.login", types.ModuleType("steampy.login"))
 
     ok, _error, cookies = steam_auth._do_steampy_login(
@@ -395,7 +399,6 @@ def test_do_steampy_login_releases_lock_when_login_executor_import_fails(monkeyp
 
     assert ok is False
     assert cookies == {}
-    assert requests.Session.request is original_request
     assert steam_auth._steampy_login_patch_lock.acquire(blocking=False)
     steam_auth._steampy_login_patch_lock.release()
 

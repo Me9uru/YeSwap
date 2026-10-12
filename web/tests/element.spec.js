@@ -268,6 +268,63 @@ describe("Element Plus 页面", () => {
     expect(wrapper.vm.dirty).toBe(true);
   });
 
+  it("模块参数就地展开并可收起，移动后跟随对应模块", async () => {
+    await render(Strategies);
+    await button("复制为自定义").trigger("click");
+    const rows = () => wrapper.findAll(".step-row");
+    expect(wrapper.find(".parameter-pane").exists()).toBe(false);
+    await rows()[4].find(".step-select").trigger("click");
+    expect(rows()[4].find(".step-select").attributes("aria-expanded")).toBe(
+      "true",
+    );
+    expect(rows()[4].find(".parameter-pane input").exists()).toBe(true);
+    await rows()[5].find(".step-select").trigger("click");
+    expect(wrapper.findAll(".parameter-pane")).toHaveLength(1);
+    expect(rows()[4].find(".parameter-pane").exists()).toBe(false);
+    await rows()[5].find(".step-select").trigger("click");
+    expect(wrapper.find(".parameter-pane").exists()).toBe(false);
+    await rows()[1].find(".step-select").trigger("click");
+    expect(rows()[1].find(".parameter-pane").text()).toContain(
+      "没有可编辑参数",
+    );
+    await rows()[4].find(".step-select").trigger("click");
+    await rows()[4]
+      .findAll("button")
+      .find((b) => b.text() === "↓")
+      .trigger("click");
+    expect(rows()[4].find(".parameter-pane").exists()).toBe(false);
+    expect(rows()[5].text()).toContain("最高折扣");
+    expect(rows()[5].find(".parameter-pane input").exists()).toBe(true);
+  });
+
+  it("添加模块后展开其参数，移除模块后面板跟随或收起", async () => {
+    await render(Strategies);
+    await button("复制为自定义").trigger("click");
+    const rows = () => wrapper.findAll(".step-row");
+    await rows()[5].find(".step-select").trigger("click");
+    await rows()[4]
+      .findAll("button")
+      .find((b) => b.text() === "移除")
+      .trigger("click");
+    expect(rows()[4].text()).toContain("关键词排除");
+    expect(rows()[4].find(".parameter-pane").text()).toContain("关键词");
+    await rows()[4]
+      .findAll("button")
+      .find((b) => b.text() === "移除")
+      .trigger("click");
+    expect(wrapper.find(".parameter-pane").exists()).toBe(false);
+    await button("添加模块").trigger("click");
+    const option = [...document.querySelectorAll(".module-option")].find((el) =>
+      el.textContent.includes("关键词排除"),
+    );
+    [...option.querySelectorAll("button")]
+      .find((b) => b.textContent.trim() === "添加 / 替换")
+      .click();
+    await nextTick();
+    expect(rows()[4].text()).toContain("关键词排除");
+    expect(rows()[4].find(".parameter-pane .el-form-item").exists()).toBe(true);
+  });
+
   it("实际到账按 sale_proceeds 提交，携带稳定记录 ID", async () => {
     data["/transactions"].transactions = [
       {

@@ -35,17 +35,12 @@ class SteamDTQueryParams:
 @dataclass
 class SteamDTRow:
     index: str = ""
-    name: str = ""            
-    volume: str = "0"         
-    min_price: str = "0"     
-    sell_ratio: str = "0"     
-    buy_ratio: str = "0"      
-    safe_buy_ratio: str = "0" 
-    recent_ratio: str = "0"   
-    platform: str = ""        
-    steam_link: str = ""      
-    update_time: str = ""     
+    name: str = ""
+    volume: str = "0"
+    min_price: str = "0"
+    sell_ratio: str = "0"
+    buy_ratio: str = "0"
+    platform: str = ""
+    steam_link: str = ""
 
-    name_cn: str = ""         
-    steam_price: float = 0.0  
-    profit_amount: float = 0.0
+    name_cn: str = ""

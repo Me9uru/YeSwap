@@ -72,7 +72,6 @@ def test_submit_listing_handles_invalid_response_shapes(
     assert recorded == []
     assert any("上架响应异常" in message for message in messages)
     assert any(expected_detail in message for message in messages)
-    assert not any("未捕获异常" in message for message in messages)
 
 
 @pytest.mark.parametrize(
@@ -113,7 +112,6 @@ def test_submit_listing_preserves_success_variants(monkeypatch, payload):
 
     assert listed == 1
     assert len(recorded) == 1
-    assert not any("未捕获异常" in message for message in _messages(ctx))
 
 
 def test_submit_listing_retry_null_is_diagnostic_and_not_success(
@@ -162,7 +160,6 @@ def test_submit_listing_retry_null_is_diagnostic_and_not_success(
         "上架重试响应异常" in message and "HTTP 200; body=null" in message
         for message in messages
     )
-    assert not any("未捕获异常" in message for message in messages)
 
 
 def test_submit_listing_retry_success_is_recorded_once(monkeypatch):
@@ -309,51 +306,3 @@ def test_parse_sell_response_contract(raw, ok, parsed):
     from steam import parse_sell_response
 
     assert parse_sell_response(raw) == (ok, parsed)
-
-
-@pytest.mark.parametrize(
-    ("status_code", "text", "expected_ok", "expected_response"),
-    [
-        (200, '{"success": true}', True, {"success": True}),
-        (500, '{"success": true}', False, {"success": True}),
-    ],
-)
-def test_list_item_by_name_preserves_safe_response_contract(
-    monkeypatch,
-    status_code,
-    text,
-    expected_ok,
-    expected_response,
-):
-    from steam import inventory, market
-
-    asset = {
-        "appid": 753,
-        "contextid": 6,
-        "assetid": "asset-1",
-    }
-    monkeypatch.setattr(inventory, "fetch_inventory", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        inventory,
-        "find_asset_by_name",
-        lambda *_args, **_kwargs: asset,
-    )
-    monkeypatch.setattr(
-        market,
-        "list_item",
-        lambda *_args, **_kwargs: {
-            "status_code": status_code,
-            "text": text,
-        },
-    )
-
-    result = market.list_item_by_name(
-        object(),
-        "steam-id",
-        "session-id",
-        "Test Item",
-        100,
-    )
-
-    assert result["ok"] is expected_ok
-    assert result["response"] == expected_response

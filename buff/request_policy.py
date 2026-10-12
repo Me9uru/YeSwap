@@ -17,8 +17,6 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Optional, Union
 
@@ -184,39 +182,6 @@ def account_fingerprint(
                 f"{key}={cookies[key]}" for key in sorted(cookies)
             )
     return hashlib.sha256(source.encode("utf-8", errors="replace")).hexdigest()
-
-
-def parse_retry_after(
-    value: Optional[str],
-    *,
-    now: Optional[float] = None,
-    default: float = DEFAULT_RATE_LIMIT_SECONDS,
-) -> float:
-    """Parse Retry-After seconds or an RFC-compliant HTTP date."""
-
-    fallback = _retry_fallback(default)
-    if value is None:
-        return fallback
-    raw = str(value).strip()
-    try:
-        seconds = float(raw)
-    except (TypeError, ValueError):
-        pass
-    else:
-        if not math.isfinite(seconds) or seconds < 0:
-            return fallback
-        return seconds
-    try:
-        parsed = parsedate_to_datetime(raw)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        current = time.time() if now is None else float(now)
-        remaining = parsed.timestamp() - current
-        if not math.isfinite(current) or not math.isfinite(remaining):
-            return fallback
-        return max(0.0, remaining)
-    except (TypeError, ValueError, OverflowError):
-        return fallback
 
 
 class BuffRequestPolicy:
@@ -409,17 +374,6 @@ class BuffRequestPolicy:
                     "无法持久化 BUFF 请求策略清理；已继续阻断请求"
                 )
 
-    def note_external_request(self, account_key: str) -> None:
-        """Account for a browser/manual probe made outside this policy.
-
-        Successful authentication must not allow the next API request to start
-        immediately after the verification request merely because it used a
-        different HTTP transport.
-        """
-
-        with self._account_lock(account_key):
-            self._last_started[account_key] = self._clock()
-
     def _load(self) -> None:
         if self.state_path is None or not self.state_path.exists():
             if self.state_path is None:
@@ -579,7 +533,6 @@ __all__ = [
     "clear_global_policy",
     "get_global_policy",
     "get_global_request_policy",
-    "parse_retry_after",
     "reset_global_policy",
     "reset_global_request_policy",
 ]

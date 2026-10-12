@@ -21,7 +21,6 @@ def test_validate_and_fill_preserves_real_boolean_values():
                     "steam_listings_debug": True,
                     "start_time_limit_enabled": True,
                 },
-                "notify": {"holdings_report_drop_enabled": False},
                 "steam_confirm": {"enabled": True},
                 "system": {"buff_session_keepalive_enabled": True},
                 "proxy_pool": {"enabled": True},
@@ -35,7 +34,6 @@ def test_validate_and_fill_preserves_real_boolean_values():
     assert cfg["pipeline"]["verbose_debug"] is True
     assert cfg["pipeline"]["steam_listings_debug"] is True
     assert cfg["pipeline"]["start_time_limit_enabled"] is True
-    assert cfg["notify"]["holdings_report_drop_enabled"] is False
     assert cfg["steam_confirm"]["enabled"] is True
     assert cfg["system"]["buff_session_keepalive_enabled"] is True
     assert cfg["proxy_pool"]["enabled"] is True

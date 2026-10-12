@@ -4,10 +4,8 @@ import html
 import json
 import re
 import time
-import requests
 from utils.cookies import parse_cookies
-
-_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+from .session import build_steam_session
 
 
 def _build_cookies(cookies_raw: str) -> dict:
@@ -126,14 +124,9 @@ def _extract_country_code(page_text: str, config_data: dict = None) -> str:
 def get_base_auth_status(cookies_raw: str, *, require_country: bool = False):
     url = f"https://store.steampowered.com/cart/?_t={int(time.time() * 1000)}"
     cookies = _build_cookies(cookies_raw)
-    from utils.proxy_manager import get_proxy_manager
-
-    pm = get_proxy_manager()
     try:
-        proxies = pm.get_proxies_for_request()
-        resp = requests.get(
-            url, cookies=cookies, headers=_HEADERS, proxies=proxies, verify=False, timeout=15
-        )
+        session = build_steam_session(cookies=cookies)
+        resp = session.get(url, timeout=15)
         page_text = resp.text or ""
         jwt_token = ""
         config_data = _extract_store_user_config(page_text)
@@ -151,20 +144,12 @@ def get_base_auth_status(cookies_raw: str, *, require_country: bool = False):
 
 def get_wallet_balance(cookies_raw: str) -> dict:
     cookies = _build_cookies(cookies_raw)
-    from utils.proxy_manager import get_proxy_manager
-
-    pm = get_proxy_manager()
-    proxies = pm.get_proxies_for_request()
     unknown_currency_id = None
+    session = build_steam_session(
+        cookies=cookies, headers={"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"}
+    )
     try:
-        resp = requests.get(
-            "https://steamcommunity.com/market/",
-            cookies=cookies,
-            headers={**_HEADERS, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"},
-            proxies=proxies,
-            verify=False,
-            timeout=15,
-        )
+        resp = session.get("https://steamcommunity.com/market/", timeout=15)
         m = re.search(r"g_rgWalletInfo\s*=\s*(\{[^;]+\})", resp.text)
         if m:
             wallet = json.loads(m.group(1))
@@ -203,9 +188,7 @@ def get_wallet_balance(cookies_raw: str) -> dict:
                 "https://api.steampowered.com/IWalletService/GetWalletDetails/v1"
                 f"?access_token={jwt_token}"
             )
-            resp = requests.get(
-                api_url, headers=_HEADERS, proxies=proxies, verify=False, timeout=15
-            )
+            resp = session.get(api_url, timeout=15)
             if resp.status_code == 200:
                 data = resp.json().get("response", {})
                 balance_raw = int(data.get("balance", 0))

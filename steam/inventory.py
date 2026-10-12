@@ -1,8 +1,18 @@
 import logging
 import time
 from typing import List, Optional, Tuple
+from utils.delay import parse_retry_after
 class SteamAuthExpired(Exception):
     pass
+class SteamRateLimited(Exception):
+    """Steam 接口返回 429 限流。
+
+    ``retry_after`` 为服务端 Retry-After 建议的等待秒数；缺省为 0，表示
+    由业务层按自身退避策略决定冷却时长。
+    """
+    def __init__(self, retry_after: float = 0.0):
+        self.retry_after = float(retry_after or 0.0)
+        super().__init__(f"Steam 接口限流 retry_after={self.retry_after:g}s")
 INVENTORY_APP_ID = 753
 INVENTORY_CONTEXT_ID = 6
 CS2_APP_ID = 730
@@ -49,9 +59,13 @@ def fetch_inventory(
             params={"l": lang, "count": count},
             timeout=15,
         )
+        if r.status_code == 429:
+            raise SteamRateLimited(parse_retry_after(r.headers.get("Retry-After"), default=0.0))
         if r.status_code != 200:
             return None
         return r.json()
+    except SteamRateLimited:
+        raise
     except Exception:
         return None
 def check_session_validity(data: dict) -> Tuple[bool, str]:
@@ -76,8 +90,6 @@ def _fetch_full_context(
     all_assets: List[dict] = []
     descriptions_map: dict = {}
     last_assetid: Optional[str] = None
-    _429_attempts = 0
-    _MAX_429_RETRIES = 3
     while True:
         params = {
             "l": lang,
@@ -93,17 +105,9 @@ def _fetch_full_context(
                 raise SteamAuthExpired()
             if r.status_code != 200:
                 if r.status_code == 429:
-                    _429_attempts += 1
-                    if _429_attempts > _MAX_429_RETRIES:
-                        _warn_once(
-                            "429",
-                            "Steam 库存接口持续返回 429（限流），放弃本次拉取 appid=%s contextid=%s",
-                            app_id,
-                            context_id,
-                        )
-                        return None
-                    jittered_sleep(10 * (2 ** (_429_attempts - 1)))
-                    continue
+                    raise SteamRateLimited(
+                        parse_retry_after(r.headers.get("Retry-After"), default=0.0)
+                    )
                 _warn_once(
                     f"http:{r.status_code}",
                     "Steam 库存接口返回 HTTP %s，放弃本次拉取 appid=%s contextid=%s",
@@ -127,7 +131,7 @@ def _fetch_full_context(
             valid, msg = check_session_validity(data)
             if not valid:
                 raise SteamAuthExpired()
-        except SteamAuthExpired:
+        except (SteamAuthExpired, SteamRateLimited):
             raise
         except Exception as e:
             _warn_once(
@@ -164,25 +168,22 @@ def fetch_cs2_inventory(
     lang: str = "english",
     count: int = 75,
 ) -> Optional[dict]:
-    from concurrent.futures import ThreadPoolExecutor
+    # 顺序拉取 context 2 / 16：并行会把瞬时请求量翻倍，而出口 IP 的配额很小，
+    # 恢复限流比省下的一次请求更贵。
     combined_assets: List[dict] = []
     combined_descs: List[dict] = []
-    def _fetch_ctx(context_id: int):
-        return _fetch_full_context(session, steam_id, CS2_APP_ID, context_id, count=count, lang=lang)
-    results = {}
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        future_main = pool.submit(_fetch_ctx, CS2_CONTEXT_MAIN)
-        future_sec = pool.submit(_fetch_ctx, CS2_CONTEXT_SECONDARY)
-        for ctx_name, fut in [("main", future_main), ("secondary", future_sec)]:
-            try:
-                results[ctx_name] = fut.result()
-            except SteamAuthExpired:
-                return {"auth_expired": True}
-            except Exception:
-                results[ctx_name] = None
     succeeded = False
-    for key in ("main", "secondary"):
-        ctx_data = results.get(key)
+    for context_id in (CS2_CONTEXT_MAIN, CS2_CONTEXT_SECONDARY):
+        try:
+            ctx_data = _fetch_full_context(
+                session, steam_id, CS2_APP_ID, context_id, count=count, lang=lang
+            )
+        except SteamAuthExpired:
+            return {"auth_expired": True}
+        except SteamRateLimited:
+            raise
+        except Exception:
+            ctx_data = None
         if ctx_data is None:
             continue
         succeeded = True

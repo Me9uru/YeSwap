@@ -4,13 +4,14 @@ import json
 import re
 import time
 from typing import Callable, Dict, Optional, Set, Tuple
-import requests
+from curl_cffi import requests as curl_requests
 from bs4 import BeautifulSoup
 from utils.money import estimated_steam_gross_from_proceeds
 STEAM_REQUEST_TIMEOUT = 25
 STEAM_REQUEST_RETRIES = 2
 STEAM_REQUEST_RETRY_DELAY = 3
 from utils.proxy_manager import get_proxy_manager
+from steam.session import build_steam_session
 try:
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -20,21 +21,22 @@ MYLISTINGS_URL = "https://steamcommunity.com/market/mylistings/"
 MYLISTINGS_HTML_URL = "https://steamcommunity.com/market/mylistings/"
 MYHISTORY_RENDER_URL = "https://steamcommunity.com/market/myhistory/render/"
 RETRY_STATUS_CODES = (502, 503, 504)
-def _get_with_retry(url: str, params: dict, headers: dict, cookies: dict, debug_fn: Optional[Callable[[str], None]]) -> requests.Response:
+def _get_with_retry(url: str, params: dict, headers: dict, cookies: dict, debug_fn: Optional[Callable[[str], None]]) -> curl_requests.Response:
     last_err = None
     pm = get_proxy_manager()
     for attempt in range(STEAM_REQUEST_RETRIES + 1):
         try:
-            proxies = pm.get_proxies_for_request(failed=(attempt > 0))
+            proxies = pm.get_proxies_for_request(failed=True) if attempt > 0 else None
             if proxies:
                 _debug(debug_fn, f"[Steam 请求] 正在使用代理池 {proxies.get('http')} 访问: {url}")
-            r = requests.get(url, params=params, headers=headers, cookies=cookies, proxies=proxies, verify=False, timeout=STEAM_REQUEST_TIMEOUT)
+            session = build_steam_session(cookies=cookies, headers=headers, proxies=proxies)
+            r = session.get(url, params=params, timeout=STEAM_REQUEST_TIMEOUT)
             if r.status_code in RETRY_STATUS_CODES and attempt < STEAM_REQUEST_RETRIES:
                 _debug(debug_fn, f"[Steam 请求] HTTP {r.status_code}，{STEAM_REQUEST_RETRY_DELAY}s 后重试 ({attempt + 1}/{STEAM_REQUEST_RETRIES})")
                 time.sleep(STEAM_REQUEST_RETRY_DELAY)
                 continue
             return r
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.ProxyError) as e:
+        except (curl_requests.exceptions.Timeout, curl_requests.exceptions.ConnectionError, curl_requests.exceptions.ProxyError) as e:
             last_err = e
             if attempt < STEAM_REQUEST_RETRIES:
                 _debug(debug_fn, f"[Steam 请求] {type(e).__name__}，{STEAM_REQUEST_RETRY_DELAY}s 后重试 ({attempt + 1}/{STEAM_REQUEST_RETRIES})")
@@ -143,7 +145,6 @@ def fetch_my_listings(cookies, debug_fn: Optional[Callable[[str], None]] = None)
             _debug(debug_fn, "[mylistings] 无 steamLoginSecure，未登录")
             return False, set(), "未登录 Steam", {}
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
         r = _get_with_retry(MYLISTINGS_HTML_URL, {"tab": "sell"}, headers, c, debug_fn)
@@ -191,7 +192,6 @@ def fetch_my_history_sold(cookies, debug_fn: Optional[Callable[[str], None]] = N
             _debug(debug_fn, "[myhistory] 无 steamLoginSecure，未登录")
             return False, {}, "未登录 Steam"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9",
             "X-Requested-With": "XMLHttpRequest",

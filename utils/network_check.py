@@ -93,10 +93,6 @@ class NetworkChecker:
                     self._log(log_fn, "断网等待期间检测到停止请求，退出等待", "warn")
                     return False
                 time.sleep(1)
-    @property
-    def is_offline(self) -> bool:
-        with self._lock:
-            return self._is_offline
     @staticmethod
     def _log(
         log_fn: Optional[Callable[[str, str], None]],

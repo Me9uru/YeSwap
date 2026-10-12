@@ -18,8 +18,6 @@ def _行(name="Test Item", min_price="10.00", platform="https://buff.163.com/goo
         min_price=min_price,
         sell_ratio="0.85",
         buy_ratio="0.80",
-        safe_buy_ratio="0.78",
-        recent_ratio="0.82",
         platform=platform,
         steam_link="",
         volume="500",

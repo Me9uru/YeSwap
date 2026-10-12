@@ -71,29 +71,6 @@ export const settingsGroups = [
     ],
   },
   {
-    title: "消息推送与持仓报告",
-    fields: [
-      ["notify", "pushplus_token", "PushPlus Token", "password"],
-      [
-        "notify",
-        "holdings_report_interval_hours",
-        "定时报告间隔（小时，0 关闭）",
-        "integer",
-        0,
-        720,
-      ],
-      ["notify", "holdings_report_drop_enabled", "启用持仓跌幅提醒", "boolean"],
-      [
-        "notify",
-        "holdings_report_change_threshold_pct",
-        "跌幅提醒阈值（%）",
-        "number",
-        1,
-        100,
-      ],
-    ],
-  },
-  {
     title: "邮箱付款确认",
     fields: [
       ["notify", "email_user", "邮箱账号", "text"],
@@ -135,6 +112,12 @@ export const settingsGroups = [
         "system",
         "buff_session_keepalive_enabled",
         "BUFF 浏览器会话保活",
+        "boolean",
+      ],
+      [
+        "system",
+        "steam_session_keepalive_enabled",
+        "Steam 会话保活",
         "boolean",
       ],
       [

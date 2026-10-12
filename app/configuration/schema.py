@@ -77,10 +77,6 @@ DEFAULTS = {
         "refresh_seconds": 600,
     },
     "notify": {
-        "pushplus_token": "",
-        "holdings_report_interval_hours": 0,
-        "holdings_report_change_threshold_pct": 20,
-        "holdings_report_drop_enabled": True,
         "email_user": "",
         "email_pass": "",
         "imap_server": "imap.qq.com",
@@ -101,6 +97,7 @@ DEFAULTS = {
     "system": {
         "exchange_rate_refresh_hours": 24,
         "buff_session_keepalive_enabled": False,
+        "steam_session_keepalive_enabled": False,
         "session_keepalive_hours": 4.0,
         # The web UI records the browser clock zone here.  Keeping both an
         # IANA name and an offset lets containers/Windows hosts without a
@@ -205,20 +202,33 @@ def _validate_ranges(cfg: dict) -> dict:
     return cfg
 
 
-def get_app_config(loaded: dict) -> dict:
-    return _validate_ranges(validate_and_fill(merge(DEFAULTS, loaded.get("app", {}))))
+_RETIRED_NOTIFY_KEYS = frozenset({
+    "pushplus_token",
+    "holdings_report_interval_hours",
+    "holdings_report_change_threshold_pct",
+    "holdings_report_drop_enabled",
+})
 
 
 def strip_removed_feature_config(data: dict) -> dict:
     """Migrate retired feature keys without changing unrelated saved settings."""
-    return {key: value for key, value in data.items() if key != "steam_deals"}
+    out = {key: value for key, value in data.items() if key != "steam_deals"}
+    notify = out.get("notify")
+    if isinstance(notify, dict):
+        out["notify"] = {
+            key: value
+            for key, value in notify.items()
+            if key not in _RETIRED_NOTIFY_KEYS
+        }
+    return out
 
 
 def validate_and_fill(data: dict, defaults: Optional[dict] = None) -> dict:
     if defaults is None:
         defaults = DEFAULTS
-        # 旧备份可能仍含折扣游戏配置。加载时丢弃该已移除功能的字段，
-        # 下次保存会以新格式落盘；不修改数据库里的旧折扣记录。
+        # 旧备份可能仍含折扣游戏及 PushPlus 推送配置。加载时丢弃这些
+        # 已移除功能的字段，下次保存会以新格式落盘；不修改数据库里的
+        # 旧折扣记录。
         data = strip_removed_feature_config(data)
     out = {}
     for k, default in defaults.items():

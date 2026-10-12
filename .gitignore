@@ -14,14 +14,16 @@ config/steam_userdata.json
 config/holdings_report_last.json
 config/buff_request_policy.json
 config/buff_request_policy.json.tmp
-config/.buff_request_policy.json.*.tmp
 config/buff_checkout_guard.json
 config/buff_checkout_guard.json.lock
-config/.buff_checkout_guard.json.*.tmp
-config/.credentials.json.*.tmp
+config/strategies.json
+config/strategy_modules.json
+config/transactions.json
 config/transactions.json.bak
 config/steam_deals_checkpoint.json
 config/steam_deals_checkpoint.json.tmp
+# 原子写入产生的同目录隐藏临时文件
+config/.*.tmp
 
 # 日志
 log/
@@ -45,5 +47,6 @@ venv/
 .vscode/
 .DS_Store
 
-# Frontend development dependencies; the production bundle under web/dist is distributed
+# 前端依赖与构建产物（web/dist 由 npm --prefix web run build 生成，不入库）
 node_modules/
+web/dist/

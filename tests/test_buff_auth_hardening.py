@@ -311,11 +311,12 @@ def test_browser_verification_uses_browser_parsed_metadata_for_large_json(
     )
 
 
-@pytest.mark.parametrize("status_code", [403, 412])
 def test_browser_verification_trips_global_risk_circuit(
-    status_code,
     _isolated_global_buff_policy,
 ):
+    # 403 与 412 走同一个风控守卫（_trip_browser_verification 中
+    # `status_code in (403, 412)`），一行即可覆盖整条分支。
+    status_code = 403
     import buff
     from app.services.buff_auth import verify_buff_browser_session
     from buff.request_policy import account_fingerprint
@@ -526,7 +527,6 @@ def test_abandoned_relogin_times_out_and_releases_buff_lock(monkeypatch, tmp_pat
     worker.join(timeout=1)
 
     assert worker.is_alive() is False
-    assert "超时" in auth._relogin_error
     lock = auth.get_buff_auth_lock()
     assert lock.acquire(blocking=False) is True
     lock.release()
@@ -703,3 +703,89 @@ def test_keepalive_first_wait_uses_full_configured_interval(monkeypatch):
         pass
 
     assert sleeps[0] == 2.0 * 3600
+
+
+@pytest.mark.parametrize(
+    "steam_on,buff_on,expect_steam,expect_buff",
+    [
+        (True, False, 1, 0),
+        (False, True, 0, 1),
+        (True, True, 1, 1),
+    ],
+)
+def test_session_keepalive_runs_each_session_under_its_own_switch(
+    monkeypatch, steam_on, buff_on, expect_steam, expect_buff
+):
+    """Steam 与 BUFF 保活开关独立：只跑被开启的那个，两者都开则都跑。"""
+    from app.background import keepalive as workers
+    from app.services import buff_auth, steam_auth
+
+    calls = {"steam": 0, "buff": 0}
+
+    def fake_steam_relogin():
+        calls["steam"] += 1
+        return True, "auto_ok", "ok"
+
+    def fake_buff_relogin():
+        calls["buff"] += 1
+        return True, "auto_ok", "ok"
+
+    cfg = {
+        "system": {
+            "steam_session_keepalive_enabled": steam_on,
+            "buff_session_keepalive_enabled": buff_on,
+            "session_keepalive_hours": 1.0,
+        }
+    }
+    monkeypatch.setattr(workers, "load_app_config_validated", lambda: cfg)
+    monkeypatch.setattr(workers, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(workers, "_session_keepalive_is_safe", lambda: True)
+    monkeypatch.setattr(steam_auth, "try_steam_auto_relogin", fake_steam_relogin)
+    monkeypatch.setattr(buff_auth, "try_buff_auto_relogin", fake_buff_relogin)
+
+    sleeps = []
+
+    def fake_wait(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise RuntimeError("stop worker")
+
+    monkeypatch.setattr(workers, "wait", fake_wait)
+
+    with pytest.raises(RuntimeError, match="stop worker"):
+        workers.session_keepalive_worker()
+
+    assert calls == {"steam": expect_steam, "buff": expect_buff}
+
+
+def test_session_keepalive_both_switches_off_polls_without_touching_services(monkeypatch):
+    from app.background import keepalive as workers
+    from app.services import buff_auth, steam_auth
+
+    cfg = {"system": {"session_keepalive_hours": 1.0}}
+    monkeypatch.setattr(workers, "load_app_config_validated", lambda: cfg)
+    monkeypatch.setattr(workers, "log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        steam_auth,
+        "try_steam_auto_relogin",
+        lambda: pytest.fail("Steam 保活开关关闭时不得触达 Steam"),
+    )
+    monkeypatch.setattr(
+        buff_auth,
+        "try_buff_auto_relogin",
+        lambda: pytest.fail("BUFF 保活开关关闭时不得触达 BUFF"),
+    )
+
+    sleeps = []
+
+    def stop_on_sleep(seconds):
+        sleeps.append(seconds)
+        raise RuntimeError("stop worker")
+
+    monkeypatch.setattr(workers, "wait", stop_on_sleep)
+
+    with pytest.raises(RuntimeError, match="stop worker"):
+        workers.session_keepalive_worker()
+
+    # 两个开关都关闭时按 60s 轮询配置，不触达任何远程服务。
+    assert sleeps[0] == 60

@@ -51,10 +51,6 @@ from app.services.holdings import (
 )
 
 
-def api_purchases():
-    return {"purchases": get_purchases()}
-
-
 def api_add_purchase(
     *, name: str = "", price: float = 0, quantity: int = 1,
     goods_id: Optional[int] = None, steam_link: Optional[str] = None,

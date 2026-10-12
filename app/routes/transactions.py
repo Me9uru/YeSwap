@@ -32,11 +32,6 @@ class TransactionUpdateBody(BaseModel):
     listing: Optional[bool] = None
 
 
-@router.get("/api/purchases")
-def api_purchases():
-    return service.api_purchases()
-
-
 @router.post("/api/purchase")
 def api_add_purchase(body: AddPurchaseBody):
     return service.api_add_purchase(**body.model_dump())

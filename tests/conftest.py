@@ -51,6 +51,14 @@ def isolated_runtime(monkeypatch, tmp_path):
 
     monkeypatch.setattr(socket.socket, "connect", forbidden_network)
     monkeypatch.setattr(socket.socket, "connect_ex", forbidden_network)
+
+    # curl_cffi 走 libcurl C 层，不经过 socket.socket 补丁，必须单独封堵，
+    # 否则未 mock 的路径会真的发出外网请求。
+    import curl_cffi.requests as curl_requests
+
+    monkeypatch.setattr(curl_requests.Session, "request", forbidden_network)
+    monkeypatch.setattr(curl_requests.AsyncSession, "request", forbidden_network)
+    monkeypatch.setattr(curl_requests, "request", forbidden_network)
     yield
     if db_connection._engine is not None:
         db_connection._engine.dispose()

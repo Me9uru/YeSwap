@@ -151,11 +151,12 @@ def _trip_browser_verification(
 ) -> str:
     """Synchronize a browser validation failure into the global circuit."""
 
-    from buff.request_policy import parse_retry_after
+    from buff.request_policy import DEFAULT_RATE_LIMIT_SECONDS
+    from utils.delay import parse_retry_after
 
     policy, account_key = _global_policy_and_account_key()
     if rate_limited or status_code == 429:
-        delay = parse_retry_after(retry_after)
+        delay = parse_retry_after(retry_after, default=DEFAULT_RATE_LIMIT_SECONDS)
         policy.trip_rate_limit(account_key, delay, message)
         return "rate_limited"
     if status_code in (403, 412):
@@ -496,18 +497,6 @@ def try_buff_auto_relogin() -> tuple[bool, str, str]:
         lock.release()
 
 
-def _notify_buff_expired() -> None:
-    try:
-        from app.notifications.service import notify_manual_intervention_required
-
-        notify_manual_intervention_required(
-            "Buff",
-            "登录状态已失效，请前往界面重新登录。",
-        )
-    except Exception as exc:
-        log(f"buff_relogin: 发送告警通知失败 {exc}", "warn", category="buff")
-
-
 def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
     global _buff_auto_relogin_last_success
 
@@ -575,7 +564,6 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
                     set_buff_verification_required(True, message)
                 elif status == "expired":
                     set_buff_auth_expired(True)
-                    _notify_buff_expired()
                 log(f"buff_relogin: {message}，保留原凭证", "warn", category="buff")
                 return False, status, message
 
@@ -583,7 +571,6 @@ def _try_buff_auto_relogin_impl() -> tuple[bool, str, str]:
             cookies = context.cookies([BUFF_ORIGIN])
             if not any(c.get("name") == "session" and c.get("value") for c in cookies):
                 set_buff_auth_expired(True)
-                _notify_buff_expired()
                 log("buff_relogin: 浏览器 profile 中没有有效 session", "warn", category="buff")
                 return False, "expired", "登录状态已失效，请在界面重新登录"
             checkout_block = buff_credential_replacement_block_reason()

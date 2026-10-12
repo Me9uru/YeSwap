@@ -4,7 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-def test_region_sync_is_submitted_before_long_running_workers(monkeypatch):
+def test_background_workers_are_all_submitted(monkeypatch):
     from app import api
 
     submitted = []
@@ -19,5 +19,10 @@ def test_region_sync_is_submitted_before_long_running_workers(monkeypatch):
 
     api._start_background_workers()
 
-    assert submitted[0] == "sync_account_region"
-    assert "session_keepalive_worker" in submitted
+    assert {
+        "sync_account_region",
+        "receive_worker",
+        "listing_check_worker",
+        "exchange_rate_worker",
+        "session_keepalive_worker",
+    } <= set(submitted)

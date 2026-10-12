@@ -77,7 +77,6 @@ def _do_batch_wait_finalize_and_append(
     checkout_intent_id: str,
     game_buff: str,
     pay_url: str,
-    acc: float,
     set_pending_payment: callable,
     wait_payment_confirm: callable,
     confirm_payment: callable,
@@ -90,12 +89,9 @@ def _do_batch_wait_finalize_and_append(
     ok = _do_payment_notify_and_wait(
         item,
         config,
-        unit_price,
-        num,
         pay_url,
         "wechat",
         batch_id,
-        acc,
         set_pending_payment,
         wait_payment_confirm,
         confirm_payment,
@@ -327,7 +323,6 @@ def _do_wait_payment_and_append(
     pay_type: str,
     order_id: str,
     checkout_intent_id: str,
-    acc: float,
     set_pending_payment: callable,
     wait_payment_confirm: callable,
     confirm_payment: callable,
@@ -342,12 +337,9 @@ def _do_wait_payment_and_append(
     ok = _do_payment_notify_and_wait(
         item,
         config,
-        unit_price,
-        num,
         pay_url,
         pay_type,
         order_id,
-        acc,
         set_pending_payment,
         wait_payment_confirm,
         confirm_payment,
@@ -357,6 +349,43 @@ def _do_wait_payment_and_append(
     )
     if is_stop_requested() or not ok:
         return None
+    return _append_paid_single_order(
+        buff_client,
+        item,
+        config,
+        unit_price,
+        num,
+        goods_id,
+        order_id,
+        checkout_intent_id,
+        append_purchase,
+        log_fn,
+        game_buff,
+        sell_order_id=sell_order_id,
+        market_price=market_price,
+    )
+
+
+def _append_paid_single_order(
+    buff_client: Any,
+    item: Dict[str, Any],
+    config: dict,
+    unit_price: float,
+    num: int,
+    goods_id: int,
+    order_id: str,
+    checkout_intent_id: str,
+    append_purchase: callable,
+    log_fn: Optional[Callable[[str, str], None]],
+    game_buff: str,
+    sell_order_id: str = "",
+    market_price: Optional[float] = None,
+) -> float:
+    """落库一笔已确认支付的单件订单并结束对账门禁。
+
+    人工确认付款与免密自动扣款两条路径共用；调用方必须已确认订单已支付。
+    """
+
     if market_price is None:
         mhn = (item.get("steam_market_name") or item.get("name") or "").strip()
         market_price = _fetch_smart_market_price(mhn, config, app_id=730)

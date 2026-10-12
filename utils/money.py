@@ -137,10 +137,6 @@ def apply_currency(
     if rate:
         return [p * rate for p in prices], CURRENCY_CNY
     return prices, code
-def yuan_to_cents(yuan: float) -> int:
-    return max(1, int(round(yuan * 100)))
-
-
 def list_price_display_to_cents(display_amount: float, account_currency: str = "CNY") -> int:
     display_amount = round(display_amount, 2)
     total_cents = max(1, int(round(display_amount * 100)))

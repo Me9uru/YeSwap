@@ -12,7 +12,7 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 
 class TaskStatus(str, enum.Enum):
@@ -104,19 +104,6 @@ class TaskQueue:
             if info is None:
                 return None
             return self._info_to_dict(info)
-
-    def list_tasks(self, limit: int = 50) -> List[dict]:
-        with self._lock:
-            items = sorted(self._tasks.values(), key=lambda t: t.created_at, reverse=True)[:limit]
-            return [self._info_to_dict(i) for i in items]
-
-    def active_count(self) -> int:
-        with self._lock:
-            return sum(
-                1
-                for t in self._tasks.values()
-                if t.status in (TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.RETRYING)
-            )
 
     def shutdown(self, wait: bool = True) -> None:
         self._shutdown.set()

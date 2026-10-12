@@ -5,7 +5,6 @@ import time
 import logging
 import math
 import json
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -37,9 +36,6 @@ def clear_caches() -> None:
     with _sell_orders_cache_lock:
         _sell_orders_cache.clear()
 CURRENCY_CNY = 23
-STEAM_CURRENCY_USD = 1
-STEAM_CURRENCY_CNY = 23
-_ROOT = Path(__file__).resolve().parent.parent
 _EXCHANGE_RATE_FILE = DATA_DIR / "exchange_rate.json"
 _STEAM_CURRENCY_CODES = {
     1: "USD",
@@ -882,23 +878,3 @@ def compute_smart_list_price(
             reason = f"断层跳跃({p_curr:.2f}→{p_next:.2f})"
     final = max(min_floor_price, final_price + offset)
     return round(final, 2), reason
-def get_lowest_sell_price_cny(
-    session,
-    market_hash_name: str,
-    app_id: int = 730,
-    *,
-    country: str = "CN",
-    language: str = "english",
-    request_delay: float = 1.0,
-    use_cache: bool = True,
-) -> Optional[float]:
-    result = get_sell_orders_cny(
-        session,
-        market_hash_name,
-        app_id,
-        country=country,
-        language=language,
-        request_delay=request_delay,
-        use_cache=use_cache,
-    )
-    return result.get("lowest_price") if result else None

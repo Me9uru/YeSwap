@@ -3,6 +3,54 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import pytest
+
+
+class _HistoryResponse:
+    def __init__(self, status_code, headers=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+class _HistorySession:
+    def __init__(self, response):
+        self._response = response
+
+    def get(self, url, **kwargs):
+        return self._response
+
+
+def test_fetch_history_parses_retry_after_from_transport_header(monkeypatch):
+    from steam import client as steam_client_module
+
+    monkeypatch.setattr(
+        steam_client_module,
+        "build_steam_session",
+        lambda **_kwargs: _HistorySession(
+            _HistoryResponse(429, {"Retry-After": "90"})
+        ),
+    )
+
+    data, status_code, retry_after = steam_client_module.fetch_history_with_meta("AK-47 | Test")
+    assert data is None
+    assert status_code == 429
+    assert retry_after == pytest.approx(90.0)
+
+
+def test_fetch_history_429_without_header_defers_to_caller_backoff(monkeypatch):
+    from steam import client as steam_client_module
+
+    monkeypatch.setattr(
+        steam_client_module,
+        "build_steam_session",
+        lambda **_kwargs: _HistorySession(_HistoryResponse(429)),
+    )
+
+    data, status_code, retry_after = steam_client_module.fetch_history_with_meta("AK-47 | Test")
+    assert data is None
+    assert status_code == 429
+    assert retry_after is None
+
 
 class _NoProxyManager:
     def get_proxies_for_request(self, failed=False):

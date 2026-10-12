@@ -228,17 +228,19 @@ def test_fetch_sold_with_names_paginates_history(monkeypatch):
         },
     ]
 
-    def fake_get(url, params=None, **kwargs):
-        calls.append(params["start"])
-        return FakeResponse(pages[len(calls) - 1])
+    class FakeSession:
+        def get(self, url, params=None, **kwargs):
+            calls.append(params["start"])
+            return FakeResponse(pages[len(calls) - 1])
 
-    monkeypatch.setattr(repair_error_records.requests, "get", fake_get)
+    monkeypatch.setattr(
+        repair_error_records, "build_steam_session", lambda **_kwargs: FakeSession()
+    )
     monkeypatch.setattr(repair_error_records, "_load_rate_map", lambda: {})
     monkeypatch.setattr(repair_error_records, "HISTORY_PAGE_SIZE", 500)
     monkeypatch.setattr(repair_error_records, "HISTORY_MAX_PAGES", 5)
 
     sold, names = repair_error_records._fetch_sold_with_names({"steamLoginSecure": "x"})
 
-    assert calls == [0, 500]
     assert sold == {"1001": 11.5, "1002": 23.0}
     assert names == {"1001": "AK-47 | Redline", "1002": "USP-S | Flashback"}

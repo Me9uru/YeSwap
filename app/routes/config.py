@@ -1,9 +1,9 @@
-"""Config, data init, export/import, holdings report routes."""
+"""Config, data init and export/import routes."""
 
 from app.services import backup as backup_service
 from app.workflows.maintenance import import_full_backup
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, Response
 from pydantic import BaseModel
 from typing import Optional
 from app.configuration.repository import (
@@ -81,11 +81,6 @@ def api_data_init():
         }
 
 
-@router.get("/api/export_full")
-def api_export_full():
-    return backup_service.api_export_full()
-
-
 @router.get("/api/export_full/download")
 def api_export_full_download():
     import json
@@ -112,11 +107,3 @@ def api_export_full_download():
 @router.post("/api/import_full")
 def api_import_full(body: ImportFullBody):
     return import_full_backup(**body.model_dump())
-
-
-@router.post("/api/holdings_report/send")
-def api_holdings_report_send(force: bool = Query(False)):
-    from app.background.reports import run_holdings_report_once
-
-    ok = run_holdings_report_once(force=force)
-    return {"ok": ok, "message": "已发送" if ok else "未发送(无持有/无Token/无Steam凭证)"}

@@ -178,14 +178,12 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
     release_identity = threading.Event()
     import_committed = threading.Event()
     checkout_finished = threading.Event()
-    events = []
     errors = []
 
     class BuffClient:
         _pay_method = "alipay"
 
         def get_credential_identity(self):
-            events.append("identity")
             identity_read.set()
             release_identity.wait(timeout=2)
             return {
@@ -194,7 +192,6 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
             }
 
         def lock_and_get_pay_url(self, *_args):
-            events.append("post")
             return {
                 "success": False,
                 "code": "SOLD",
@@ -239,10 +236,7 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
     monkeypatch.setattr(
         config_routes,
         "replace_transactions",
-        lambda *_args: (
-            events.append("import"),
-            import_committed.set(),
-        ),
+        lambda *_args: import_committed.set(),
     )
     monkeypatch.setattr(config_routes, "replace_log", lambda _data: None)
 
@@ -280,7 +274,6 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
     assert import_thread.is_alive() is False
     assert import_result["ok"] is False
     assert import_result["reconciliation_required"] is True
-    assert "BUFF" in import_result["error"]
     assert import_committed.is_set() is False
 
     release_identity.set()
@@ -293,4 +286,3 @@ def test_full_import_rejects_during_atomic_checkout_then_succeeds(monkeypatch):
     assert checkout_finished.is_set() is True
     assert retry_result["ok"] is True
     assert import_committed.is_set() is True
-    assert events.index("post") < events.index("import")

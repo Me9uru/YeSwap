@@ -15,9 +15,6 @@ from app.steam_market.inventory import scan_cs2_inventory
 from app.background.safety import (
     _buff_background_request_is_safe,
 )
-from app.background.alerts import (
-    _worker_alert,
-)
 
 
 @stoppable_worker
@@ -91,5 +88,4 @@ def receive_worker() -> None:
             raise
         except Exception as e:
             log(f"receive_worker 异常 {type(e).__name__}: {e}", "error", category="receive")
-            _worker_alert("receive_worker", e)
             wait(60)

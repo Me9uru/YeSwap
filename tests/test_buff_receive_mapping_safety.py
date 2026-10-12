@@ -1,4 +1,4 @@
-import requests
+from curl_cffi.requests.exceptions import Timeout as CurlTimeout
 
 from app.workflows import receiving as receive_flow
 
@@ -11,19 +11,16 @@ def test_accept_timeout_is_unknown_and_non_idempotent_post_is_not_retried(
 ):
     calls = []
 
-    class ProxyManager:
-        def get_proxies_for_request(self, **_kwargs):
-            return {}
-
-    def timeout_once(*_args, **_kwargs):
-        calls.append(True)
-        raise requests.Timeout("response lost")
+    class TimeoutSession:
+        def post(self, *_args, **_kwargs):
+            calls.append(True)
+            raise CurlTimeout("response lost")
 
     monkeypatch.setattr(
-        "utils.proxy_manager.get_proxy_manager",
-        lambda: ProxyManager(),
+        receive_flow,
+        "build_steam_session",
+        lambda **_kwargs: TimeoutSession(),
     )
-    monkeypatch.setattr(receive_flow.requests, "post", timeout_once)
 
     result = receive_flow.accept_steam_trade_offer(
         "offer-1",

@@ -8,7 +8,6 @@ CV_STABLE = 0.15
 CV_STABLE_LOW = 0.05
 MIN_TRADES = 5
 MIN_DAILY_TRADES = 5
-TRIM_RATIO = 0.1
 SLOPE_DAYS = 7
 SLOPE_DOWN_THRESHOLD = -0.5
 R2_TREND_THRESHOLD = 0.6
@@ -16,7 +15,6 @@ USD_TO_CNY = 7.2
 STATUS_STABLE = "STABLE"
 STATUS_RISING = "RISING"
 STATUS_FALLING = "FALLING"
-STATUS_CHAOS = "CHAOS"
 STATUS_UNKNOWN = "UNKNOWN"
 def _percentile(sorted_arr: List[float], p: float) -> float:
     n = len(sorted_arr)
@@ -143,7 +141,6 @@ def analyze_by_time(
     usd_to_cny: float = USD_TO_CNY,
     cv_threshold: float = CV_STABLE_LOW,
     min_daily_trades: float = MIN_DAILY_TRADES,
-    trim_ratio: float = TRIM_RATIO,
     slope_down_threshold: float = SLOPE_DOWN_THRESHOLD,
     slope_days: int = SLOPE_DAYS,
     r2_threshold: float = R2_TREND_THRESHOLD,

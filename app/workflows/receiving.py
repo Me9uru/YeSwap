@@ -2,9 +2,8 @@
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import requests
-
 from buff import BuffAuthExpired, BuffRequestBlocked
+from steam.session import build_steam_session
 from app.services.delay import jittered_sleep
 try:
     import urllib3
@@ -104,13 +103,10 @@ def accept_steam_trade_offer(
     was received.  Callers must reconcile inventory instead of resending the
     non-idempotent POST immediately.
     """
-    from utils.proxy_manager import get_proxy_manager
     try:
-        pm = get_proxy_manager()
         url = STEAM_ACCEPT_URL.format(trade_offer_id=trade_offer_id)
         referer = STEAM_ACCEPT_REFERER.format(trade_offer_id=trade_offer_id)
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
             "Origin": "https://steamcommunity.com",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
             "Referer": referer,
@@ -123,16 +119,8 @@ def accept_steam_trade_offer(
             "partner": "",
             "captcha": "",
         }
-        proxies = pm.get_proxies_for_request(failed=False)
-        r = requests.post(
-            url,
-            headers=headers,
-            cookies=steam_cookies,
-            proxies=proxies,
-            data=data,
-            verify=False,
-            timeout=15,
-        )
+        session = build_steam_session(cookies=steam_cookies, headers=headers)
+        r = session.post(url, data=data, timeout=15)
         if r.status_code != 200:
             return None
         raw_text = (r.text or "").strip()

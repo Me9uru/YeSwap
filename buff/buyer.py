@@ -19,11 +19,11 @@ from .request_policy import (
     BuffRiskControlTriggered,
     BuffVerificationRequired,
     BuffWriteResultUnknown,
+    DEFAULT_RATE_LIMIT_SECONDS,
     account_fingerprint,
     get_global_policy,
-    parse_retry_after,
 )
-from utils.delay import jittered_sleep
+from utils.delay import jittered_sleep, parse_retry_after
 
 BUFF_COOKIE_DOMAIN = "buff.163.com"
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -128,7 +128,10 @@ def _looks_like_html(headers, text: str) -> bool:
 def _html_looks_like_login(text: str) -> bool:
     lowered = str(text or "").lower()
     return any(marker in lowered for marker in ("/login", "登录", "未登录", "sign in"))
-PAY_METHOD_ALIPAY = 51
+# BUFF 的 49 是通用支付宝渠道；51 是「支付宝-信用卡花呗」独立渠道（含渠道
+# 服务费），不能作为免密/普通支付宝支付的默认值（参考上游对 BUFF 购买预检
+# 的实测结论）。
+PAY_METHOD_ALIPAY = 49
 PAY_METHOD_WECHAT = 6
 API_HISTORY = "https://buff.163.com/api/market/buy_order/history"
 API_SELL_ORDER = "https://buff.163.com/api/market/goods/sell_order"
@@ -140,8 +143,42 @@ API_BATCH_BUY_CREATE = "https://buff.163.com/api/market/goods/batch_buy/create"
 API_BATCH_WX_PAY_QRCODE = "https://buff.163.com/api/market/goods/batch_buy/wx_pay_qrcode"
 API_ASK_SELLER_SEND = "https://buff.163.com/api/market/bill_order/ask_seller_to_send_offer"
 API_STEAM_TRADE = "https://buff.163.com/api/market/steam_trade"
+API_BUY_ORDER_CHECK_STATE = "https://buff.163.com/api/market/buy_order/check_state"
 ASK_SELLER_MAX_ATTEMPTS = 3
 ASK_SELLER_BETWEEN_REQUEST_SECONDS = 1.5
+BUY_ORDER_PAY_PAID = "paid"
+BUY_ORDER_PAY_FAILED = "failed"
+BUY_ORDER_PAY_PENDING = "pending"
+BUY_ORDER_PAY_UNKNOWN = "unknown"
+# BUFF 收银台对单个买单的付款状态机（与网页客户端轮询逻辑一致）：
+# state=6 为待付款（pay_expire_timeout<0 表示支付窗口已过），state=7 为付款失败，
+# 其余数值状态均为已支付终态。
+BUY_ORDER_PAY_STATE_PAYING = 6
+BUY_ORDER_PAY_STATE_FAILED = 7
+
+
+def classify_buy_order_pay_state(state, pay_expire_timeout) -> str:
+    """把 ``buy_order/check_state`` 的原始字段归类为付款状态。
+
+    无法解析的状态一律返回 unknown，调用方必须保持人工对账门禁，
+    不得把含糊响应推断为已支付。
+    """
+
+    if isinstance(state, bool):
+        return BUY_ORDER_PAY_UNKNOWN
+    try:
+        state_value = int(state)
+    except (TypeError, ValueError):
+        return BUY_ORDER_PAY_UNKNOWN
+    try:
+        expires = float(pay_expire_timeout)
+    except (TypeError, ValueError):
+        expires = 0.0
+    if state_value == BUY_ORDER_PAY_STATE_FAILED:
+        return BUY_ORDER_PAY_FAILED
+    if state_value == BUY_ORDER_PAY_STATE_PAYING:
+        return BUY_ORDER_PAY_FAILED if expires < 0 else BUY_ORDER_PAY_PENDING
+    return BUY_ORDER_PAY_PAID
 from utils.cookies import parse_cookies as _parse_cookies
 def _csrf(cookies_dict: dict) -> str:
     return cookies_dict.get("csrf_token", "").strip('"')
@@ -298,13 +335,6 @@ class BuffBuyer:
             if not new_cookie.is_expired():
                 self.session.cookies.set_cookie(new_cookie)
 
-    def reset_request_circuit(self) -> None:
-        """Explicitly re-enable this account after successful browser verification."""
-
-        self.request_policy.reset(self.account_key)
-
-    clear_request_circuit = reset_request_circuit
-
     def _make_request(self, method: str, url: str, **kwargs) -> dict:
         method = method.upper()
         headers_override = kwargs.pop("headers", None)
@@ -398,7 +428,8 @@ class BuffBuyer:
 
             if _is_rate_limited(status_code, data):
                 retry_after = parse_retry_after(
-                    _header_value(response_headers, "Retry-After") or None
+                    _header_value(response_headers, "Retry-After") or None,
+                    default=DEFAULT_RATE_LIMIT_SECONDS,
                 )
                 message = data.get("error") or data.get("msg") or "BUFF 请求过于频繁"
                 self.request_policy.trip_rate_limit(
@@ -552,31 +583,38 @@ class BuffBuyer:
         except Exception:
             return None
 
-    def check_wait_pay_orders(self, game: str = "csgo") -> bool:
+    def get_buy_order_pay_state(self, order_id: str, game: str = "csgo") -> str:
+        """只读查询一个买单的收银台付款状态。
+
+        免密支付（网易宝快捷代扣）在订单创建后由 BUFF 自动扣款，此时不会
+        返回支付链接；网页客户端改用 ``buy_order/check_state`` 轮询确认结果。
+        本方法只读，不会创建、修改或重试任何订单写请求。
+        """
+
         params = {
-            "game": game,
-            "page_num": "1",
-            "page_size": "10",
-            "state": "wait_pay",
+            "buy_order_id": str(order_id),
             "_": str(int(time.time() * 1000)),
         }
+        h = {
+            "Referer": f"https://buff.163.com/market/buy_order/history?game={game}",
+        }
         try:
-            res = self._make_request("GET", API_HISTORY, params=params)
-            items = res.get("data", {}).get("items", [])
-            if items:
-                logger.info("检测到 %d 个待付款订单，正在获取支付链接...", len(items))
-                for item in items:
-                    if self.pay_method == PAY_METHOD_WECHAT:
-                        self._fetch_wechat_url(game, item["id"])
-                    else:
-                        self._fetch_pay_url(game, item["id"])
-                return True
-            return False
+            res = self._make_request(
+                "GET", API_BUY_ORDER_CHECK_STATE, params=params, headers=h
+            )
         except (BuffAuthExpired, BuffRequestBlocked):
             raise
-        except Exception as e:
-            logger.exception("检查订单失败: %s", e)
-        return False
+        except Exception:
+            return BUY_ORDER_PAY_UNKNOWN
+        if not isinstance(res, dict) or res.get("code") != "OK":
+            return BUY_ORDER_PAY_UNKNOWN
+        data = res.get("data")
+        if not isinstance(data, dict):
+            return BUY_ORDER_PAY_UNKNOWN
+        return classify_buy_order_pay_state(
+            data.get("state"), data.get("pay_expire_timeout")
+        )
+
     def get_sell_orders(self, goods_id: int, game: str = "csgo") -> Optional[list]:
         params = {
             "game": str(game),
@@ -628,150 +666,6 @@ class BuffBuyer:
             return None
         except Exception:
             return None
-    def get_and_buy(
-        self,
-        goods_id: int,
-        price_tolerance: float,
-        game: str = "csgo",
-    ) -> None:
-        """Compatibility helper that performs at most one purchase write.
-
-        Callers that need candidate fallback must reconcile the first write
-        before selecting another sell order.  A failed BUFF response alone is
-        not sufficient evidence that no order was created.
-        """
-        try:
-            items = self.get_sell_orders(goods_id, game) or []
-            if not items:
-                logger.info("当前无人上架 (ID: %s)", goods_id)
-                return
-
-            base_price = float(items[0]["price"])
-            first = items[0]
-            current_price = float(first["price"])
-            price_diff = current_price - base_price
-            if price_diff > float(price_tolerance):
-                logger.warning(
-                    "价格熔断：%s (差价 %.2f) > %s",
-                    current_price,
-                    price_diff,
-                    price_tolerance,
-                )
-                return
-
-            logger.info(
-                "单次尝试购买 [%s] 价格: %s",
-                first.get("user_id", "unknown"),
-                current_price,
-            )
-            result = self._execute_post_buy(
-                game, goods_id, first["id"], first["price"]
-            )
-            if result == "SUCCESS":
-                logger.info("购买流程结束。")
-            elif result == "COOLING_DOWN":
-                logger.warning("触发频率限制/存在未付款订单，停止购买。")
-            else:
-                logger.warning("购买结果未成功，停止购买且不尝试下一卖单。")
-        except (BuffAuthExpired, BuffRequestBlocked, BuffWriteResultUnknown):
-            raise
-        except Exception as e:
-            logger.exception("运行流程异常: %s", e)
-    def _execute_post_buy(
-        self,
-        game: str,
-        goods_id: int,
-        order_id: str,
-        price: str,
-    ) -> str:
-        payload = {
-            "game": game,
-            "goods_id": str(goods_id),
-            "sell_order_id": order_id,
-            "price": price,
-            "pay_method": self.pay_method,
-            "allow_tradable_cooldown": 0,
-            "token": "",
-            "cdkey_id": "",
-            "hide_non_epay": True,
-        }
-        if self.pay_method == PAY_METHOD_ALIPAY:
-            payload["steamid"] = None
-        h = {"Referer": f"https://buff.163.com/goods/{goods_id}?from=market"}
-        try:
-            res = self._make_request("POST", API_BUY, headers=h, data=json.dumps(payload))
-            if res.get("code") == "OK":
-                data = res.get("data")
-                if not isinstance(data, dict):
-                    raise BuffWriteResultUnknown(
-                        "BUFF 锁单返回成功但 data 格式异常，结果未知",
-                        method="POST",
-                        url=API_BUY,
-                    )
-                new_order_id = _normalize_server_identifier(data.get("id"))
-                if not new_order_id:
-                    raise BuffWriteResultUnknown(
-                        "BUFF 锁单返回成功但缺少订单号，结果未知",
-                        method="POST",
-                        url=API_BUY,
-                    )
-                logger.info("锁单成功！订单号: %s", new_order_id)
-                if self.pay_method == PAY_METHOD_WECHAT:
-                    jittered_sleep(0.5)
-                    self._fetch_wechat_url(game, new_order_id)
-                else:
-                    self._fetch_pay_url(game, new_order_id)
-                return "SUCCESS"
-            error_code = str(res.get("code", ""))
-            err_msg = res.get("error") or res.get("msg") or f"接口返回异常 Code: {error_code}"
-            msg = str(err_msg)
-            if "Cooling Down" in error_code or "Cooling Down" in msg:
-                return "COOLING_DOWN"
-            if error_code == "Error":
-                logger.warning("卖家不支持当前支付方式 (Code: Error)")
-                return "FAIL"
-            logger.warning("锁单失败: %s", err_msg)
-            return "FAIL"
-        except (BuffAuthExpired, BuffRequestBlocked, BuffWriteResultUnknown):
-            raise
-        except Exception as e:
-            logger.exception("锁单异常: %s", e)
-            return "FAIL"
-    def _fetch_pay_url(self, game: str, order_id: str) -> Optional[str]:
-        params = {
-            "bill_order_id": str(order_id),
-            "_": str(int(time.time() * 1000)),
-        }
-        h = {
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"https://buff.163.com/market/buy_order/history?game={game}",
-        }
-        try:
-            logger.info("正在请求订单 %s 的支付链接 (GET)...", order_id)
-            res = self._make_request("GET", API_PAGE_PAY, params=params, headers=h)
-            if res.get("code") == "OK":
-                data = res.get("data", {})
-                elements_v2 = data.get("elements_v2", {})
-                alipay_info = elements_v2.get("alipay", {})
-                pay_url = (
-                    alipay_info.get("url")
-                    or data.get("elements", {}).get("url")
-                    or data.get("url")
-                )
-                if pay_url:
-                    logger.info("获取成功！支付链接如下：\n%s", pay_url)
-                    logger.info("剩余支付时间: %ss", data.get('pay_expire_timeout', 'N/A'))
-                    return pay_url
-                logger.warning("接口返回 OK 但未找到 URL: %s", res)
-            else:
-                err = res.get("error") or res.get("msg") or f"未返回 error 字段 (Code: {res.get('code', 'N/A')})"
-                logger.warning("支付接口返回错误: %s", err)
-        except (BuffAuthExpired, BuffRequestBlocked):
-            raise
-        except Exception as e:
-            logger.exception("获取支付链接异常: %s", e)
-        return None
     def lock_and_get_pay_url(
         self,
         game: str,
@@ -993,31 +887,6 @@ class BuffBuyer:
         except Exception:
             pass
         return None
-    def _fetch_wechat_url(self, game: str, order_id: str) -> None:
-        pay_url = self._get_wechat_pay_url(game, order_id)
-        if pay_url:
-            logger.info("链接获取成功，正在生成二维码...")
-            self._generate_qr_code(pay_url)
-        else:
-            logger.warning("未找到微信支付 URL")
-            
-    def _generate_qr_code(self, url: str) -> None:
-        try:
-            import qrcode
-            qr = qrcode.QRCode(version=1, box_size=10, border=4)
-            qr.add_data(url)
-            qr.make(fit=True)
-            img = qr.make_image(fill_color="black", back_color="white")
-            img.show()
-            logger.info("二维码已弹出，请用微信扫码！")
-            logger.info("进入支付等待期 30 秒...")
-            time.sleep(30)
-        except ImportError:
-            logger.warning("未安装 qrcode，请执行: uv sync")
-            logger.info("支付链接: %s", url)
-            time.sleep(30)
-        except Exception as e:
-            logger.exception("生成二维码失败: %s", e)
     def batch_buy_create(
         self,
         goods_id: int,

@@ -28,7 +28,6 @@ class State:
     _pending_payment: Optional[dict]
     _user_confirmed: Optional[bool]
     _stop_requested: bool
-    _plan: List[Any]
     _inventory: List[Any]
     _buff_auth_expired: bool
     _buff_verification_required: bool
@@ -47,7 +46,6 @@ class State:
         self._pending_payment = None
         self._user_confirmed = None
         self._stop_requested = False
-        self._plan = []
         self._inventory = []
         self._buff_auth_expired = False
         self._buff_verification_required = False
@@ -192,12 +190,6 @@ class State:
     def is_stop_requested(self) -> bool:
         with self._lock:
             return self._stop_requested
-    def set_plan(self, plan: list) -> None:
-        with self._lock:
-            self._plan = list(plan)
-    def get_plan(self) -> list:
-        with self._lock:
-            return list(self._plan)
     def set_inventory(self, items: list) -> None:
         with self._lock:
             self._inventory = list(items)
@@ -262,10 +254,6 @@ def clear_stop() -> None:
     get_state().clear_stop()
 def is_stop_requested() -> bool:
     return get_state().is_stop_requested()
-def set_plan(plan: list) -> None:
-    get_state().set_plan(plan)
-def get_plan() -> list:
-    return get_state().get_plan()
 def append_purchase(p: dict) -> None:
     db_append_purchase(p)
 def get_purchases() -> list:

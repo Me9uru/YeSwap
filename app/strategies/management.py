@@ -152,16 +152,6 @@ def import_strategy(raw_strategy: dict) -> Dict[str, Any]:
     return save_strategy(strategy)
 
 
-def export_strategy(strategy_id: str) -> Dict[str, Any]:
-    strategy = get_strategy(strategy_id)
-    if not strategy:
-        raise StrategyError("策略不存在")
-    out = copy.deepcopy(strategy)
-    out.pop("created_at", None)
-    out.pop("updated_at", None)
-    return _sanitize_value(out)
-
-
 def get_strategy_payload() -> Dict[str, Any]:
     cfg = load_app_config_validated()
     active = get_active_strategy_ids(cfg)

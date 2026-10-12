@@ -59,12 +59,13 @@ routes -> workflows / services -> 业务域 -> storage / 平台适配器 -> util
 | `purchase/selection.py`、`market.py` | 候选筛选、稳定性、平台报价与预检 |
 | `purchase/checkout.py` | 购买前验证、采购量与单件/批量路径选择 |
 | `purchase/single.py`、`batch.py` | 各自购买请求及结果分类；共享显式 `PurchaseContext` |
-| `purchase/payment.py` | 通知、邮件等待、订单关联的人工确认 |
+| `purchase/payment.py` | 付款等待、邮件确认与订单关联的人工确认 |
 | `purchase/settlement.py`、`identity.py` | 结算落库、部分成交、凭证一致性 |
 | `strategies/catalog.py`、`module_specs.py`、`system_presets.py`、`registry.py` | 策略约束、内置模块、系统预设及用户模块登记 |
 | `workflows/schedule.py` | 购买时段和配置时区规则 |
 | `services/buff_browser_probe.py` | BUFF 浏览器页面挑战检测与用户代理读取 |
 | `steam_market/listing_response.py` | Steam 上架响应判定与日志脱敏 |
+| `steam/session.py` | Steam 社区/市场会话工厂：curl_cffi 浏览器指纹与代理策略；访问 steamcommunity.com 必须复用，不得手写 User-Agent/Accept-Encoding |
 | `strategies/repository.py` | 策略文件读写、进程内写操作互斥、原子替换 |
 | `strategies/validation.py`、`runtime.py` | 合法性检查及现有配置兼容转换 |
 | `strategies/expressions.py`、`rules.py`、`simulation.py` | 声明式条件、共享纯规则、样例模拟 |
@@ -73,13 +74,12 @@ routes -> workflows / services -> 业务域 -> storage / 平台适配器 -> util
 | `services/transactions.py`、`holdings.py` | 交易应用操作和共用持仓补价 |
 | `services/backup.py`、`maintenance.py` | 备份恢复和数据重置；原有维护互斥门禁保留 |
 | `steam_market/` | Steam 库存、价格、挂单、撤单及市场确认 |
-| `notifications/service.py` | PushPlus、邮件付款确认及持仓报告 |
+| `notifications/service.py` | 邮件付款确认指令监听与解析 |
 | `maintenance/` | 历史成交同步及错误交易记录修复 |
-| `gifts/engine.py` | 可选 Steam 赠礼应用流程 |
 | `runtime/state.py` | 进程内状态、日志、付款条件变量及停止状态 |
 | `runtime/pipeline_control.py` | 数据重置后的全局停机标记 |
 | `utils/money.py` | Steam 展示总价与预计到账换算，币种及最小单位工具 |
-| `steam/account.py` | 钱包和地区查询，不经由赠礼引擎 |
+| `steam/account.py` | 钱包和地区查询，独立于购买与出售流程 |
 
 `runtime.State` 保留运行状态、日志和付款条件变量。交易查询与写入的实现仅存在于交易
 仓储，运行态只提供流程所需调用，不保存第二份交易缓存。认证服务由 `app/api.py` 注入
@@ -110,9 +110,9 @@ flush/fsync 和原子替换。此锁不宣称支持多个应用进程共享数�
 聚合位于 `web/src/services/analytics.js`。新功能直接在 Vue 层实现，不向 `window`
 挂载业务函数。
 
-Vite 将生产资源构建到 `web/dist/`，FastAPI 只托管该目录。修改前端源码后运行
-`npm --prefix web run build`；本地前后端分离开发可使用 `npm --prefix web run dev`，其
-`/api` 请求代理到 `127.0.0.1:28472`。
+Vite 将生产资源构建到 `web/dist/`，FastAPI 只托管该目录。`web/dist` 是构建产物，不入仓库，
+由启动时自动构建或手动运行 `npm --prefix web run build` 生成；本地前后端分离开发可使用
+`npm --prefix web run dev`，其 `/api` 请求代理到 `127.0.0.1:28472`。
 
 库存与市场价定时器随应用挂载与卸载统一启动、回收，读取已保存的刷新间隔。设置只提交修改
 字段，不以旧配置快照覆盖策略中心的更新。付款确认固定捕获所核对的订单号；对账保留
@@ -120,8 +120,6 @@ Vite 将生产资源构建到 `web/dist/`，FastAPI 只托管该目录。修改�
 重复提交，失败不自动重试写入。策略模拟在草稿变化后失效；自定义策略启用前必须模拟并确认
 差异；固定模块、依赖与互斥保留前后端校验。
 
-赠礼 API 保持兼容，当前 UI 不提供入口。游戏折扣及卡片功能已移除；旧折扣表数据不会由
-启动迁移删除。
 
 ## 交易与数据安全
 

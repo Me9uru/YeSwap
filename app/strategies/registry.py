@@ -41,10 +41,6 @@ def _sanitize_value(value: Any) -> Any:
     return value
 
 
-def _system_by_id() -> Dict[str, Dict[str, Any]]:
-    return {s["id"]: copy.deepcopy(s) for s in SYSTEM_STRATEGIES}
-
-
 def _user_module_by_id() -> Dict[str, Dict[str, Any]]:
     out = {}
     for m in _module_store().get("modules", []):

@@ -197,7 +197,6 @@ def _try_batch_buy(ctx: PurchaseContext) -> _PurchaseAttempt:
             checkout_intent_id,
             ctx.game_buff,
             pay_url,
-            ctx.acc,
             ctx.set_pending_payment,
             ctx.wait_payment_confirm,
             ctx.confirm_payment,

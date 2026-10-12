@@ -15,7 +15,6 @@ from app.background.exchange_rates import exchange_rate_worker
 from app.background.keepalive import session_keepalive_worker
 from app.background.listings import listing_check_worker
 from app.background.receive import receive_worker
-from app.background.reports import holdings_report_worker
 from app.services.task_queue import get_task_queue, shutdown_task_queue
 from app.services.lifecycle import stop_event
 from app.services.auth_session import configure_pipeline_resume
@@ -41,7 +40,6 @@ def _start_background_workers() -> None:
         receive_worker,
         listing_check_worker,
         exchange_rate_worker,
-        holdings_report_worker,
         session_keepalive_worker,
     ):
         q.submit(fn, name=fn.__name__, max_retries=3, retry_base_delay=5.0)

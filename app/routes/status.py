@@ -7,7 +7,6 @@ from app.runtime.state import (
     confirm_payment,
     get_log,
     get_pending_payment,
-    get_plan,
     get_status,
     set_pending_payment,
 )
@@ -59,9 +58,6 @@ def api_log_export():
     ) + f"\n# timezone: {timezone_label}\n"
     filename.write_text(content, encoding="utf-8")
     return {"ok": True, "path": str(filename), "lines": len(lines)}
-@router.get("/api/plan")
-def api_plan():
-    return {"plan": get_plan()}
 @router.get("/api/pending_payment")
 def api_pending_payment():
     return {"pending": get_pending_payment()}

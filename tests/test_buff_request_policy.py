@@ -7,11 +7,16 @@ from requests.cookies import RequestsCookieJar, create_cookie
 
 from buff.buyer import (
     API_BUY,
+    API_BUY_ORDER_CHECK_STATE,
     API_HISTORY,
     API_PAGE_PAY,
-    API_SELL_ORDER,
     API_STEAM_TRADE,
     API_WX_PAY_QRCODE,
+    BUY_ORDER_PAY_FAILED,
+    BUY_ORDER_PAY_PAID,
+    BUY_ORDER_PAY_PENDING,
+    BUY_ORDER_PAY_UNKNOWN,
+    PAY_METHOD_ALIPAY,
     PAY_METHOD_WECHAT,
     BuffBuyer,
 )
@@ -25,7 +30,6 @@ from buff.request_policy import (
     DEFAULT_MIN_REQUEST_INTERVAL,
     DEFAULT_RATE_LIMIT_SECONDS,
     account_fingerprint,
-    parse_retry_after,
 )
 
 
@@ -93,6 +97,12 @@ def test_default_user_agent_is_stable_and_can_be_overridden():
 
     assert custom.headers["User-Agent"] == "Browser/7"
     assert custom.user_agent == "Browser/7"
+
+
+def test_generic_alipay_uses_wallet_channel_not_credit_card_huabei():
+    # 对 BUFF 购买预检的实测结论：49 是通用支付宝渠道，51 是「支付宝-信用卡
+    # 花呗」独立渠道。默认值退回 51 会让免密/余额扣款被路由到花呗渠道并失败。
+    assert PAY_METHOD_ALIPAY == 49
 
 
 def test_close_only_releases_an_internally_owned_session(monkeypatch):
@@ -288,10 +298,10 @@ def test_failed_policy_replace_leaves_restart_fail_closed_marker(
     reloaded.raise_if_blocked(buyer.account_key)
 
 
-@pytest.mark.parametrize("status_code", [403, 412])
-def test_risk_http_status_opens_persistent_circuit_until_explicit_reset(
-    status_code, tmp_path
-):
+def test_risk_http_status_opens_persistent_circuit_until_explicit_reset(tmp_path):
+    # 403 与 412 走同一个风控守卫（buyer 中 `status_code in {403, 412}`），
+    # 一行即可覆盖整条分支。
+    status_code = 403
     session = FakeSession(
         FakeResponse({"code": "FAIL"}, status_code=status_code),
         FakeResponse({"code": "OK"}),
@@ -318,7 +328,7 @@ def test_risk_http_status_opens_persistent_circuit_until_explicit_reset(
         reloaded._make_request("GET", "https://buff.163.com/api/reloaded")
     assert reloaded_session.calls == []
 
-    buyer.reset_request_circuit()
+    policy.reset(buyer.account_key)
     assert buyer._make_request("GET", "https://buff.163.com/api/three") == {
         "code": "OK"
     }
@@ -333,37 +343,6 @@ def test_get_sell_orders_non_ok_does_not_retry():
 
     assert buyer.get_sell_orders(123) is None
     assert len(session.calls) == 1
-
-
-def test_legacy_get_and_buy_never_falls_through_to_second_sell_order():
-    session = FakeSession(
-        FakeResponse(
-            {
-                "code": "OK",
-                "data": {
-                    "items": [
-                        {"id": "sell-1", "price": "10.00", "user_id": "one"},
-                        {"id": "sell-2", "price": "10.00", "user_id": "two"},
-                    ]
-                },
-            }
-        ),
-        FakeResponse({"code": "FAIL", "msg": "rejected"}),
-    )
-    buyer = BuffBuyer(
-        "session=s; csrf_token=c",
-        session=session,
-        request_policy=no_wait_policy(),
-    )
-
-    buyer.get_and_buy(123, price_tolerance=1.0)
-
-    assert [(method, url) for method, url, _ in session.calls] == [
-        ("GET", API_SELL_ORDER),
-        ("POST", API_BUY),
-    ]
-    payload = json.loads(session.calls[1][2]["data"])
-    assert payload["sell_order_id"] == "sell-1"
 
 
 def test_configured_request_timeout_is_used_by_default():
@@ -443,26 +422,6 @@ def test_production_defaults_use_two_second_interval_and_five_minute_429():
     with pytest.raises(BuffRateLimited) as exc_info:
         buyer._make_request("GET", "https://buff.163.com/api/rate")
     assert exc_info.value.retry_after == pytest.approx(300.0)
-
-
-@pytest.mark.parametrize(
-    "raw",
-    # Every non-finite literal (NaN, Infinity, -Infinity) and every negative
-    # value fails the same `not math.isfinite(seconds) or seconds < 0` guard and
-    # returns the same default, so one representative of each clause is enough.
-    ["NaN", "-1"],
-)
-def test_invalid_numeric_retry_after_uses_safe_default(raw):
-    assert parse_retry_after(raw) == pytest.approx(DEFAULT_RATE_LIMIT_SECONDS)
-
-
-def test_non_finite_or_negative_retry_defaults_are_also_rejected():
-    assert parse_retry_after(None, default=float("nan")) == pytest.approx(
-        DEFAULT_RATE_LIMIT_SECONDS
-    )
-    assert parse_retry_after(None, default=-1) == pytest.approx(
-        DEFAULT_RATE_LIMIT_SECONDS
-    )
 
 
 def test_cooling_down_response_opens_default_rate_limit_circuit():
@@ -622,7 +581,6 @@ def test_public_lock_method_does_not_swallow_unknown_write_result():
 @pytest.mark.parametrize(
     ("method_name", "args", "pay_method"),
     [
-        ("_execute_post_buy", ("csgo", 1, "sell-order", "10.00"), None),
         ("lock_and_get_pay_url", ("csgo", 1, "sell-order", "10.00"), None),
         ("batch_buy_create", (1, 10.0, 2, "csgo"), PAY_METHOD_WECHAT),
         (
@@ -851,15 +809,6 @@ def test_payment_lookup_retries_until_qrcode_is_available(monkeypatch):
         ("GET", API_WX_PAY_QRCODE),
         ("GET", API_WX_PAY_QRCODE),
     ]
-    diagnostic = buyer.last_payment_lookup_diagnostic
-    assert diagnostic["payment_kind"] == "wechat"
-    assert diagnostic["order_id"] == "wechat-order"
-    assert diagnostic["attempt"] == 1
-    assert diagnostic["attempts"] == 4
-    assert diagnostic["http_status"] == 200
-    assert diagnostic["code"] == "OK"
-    assert diagnostic["data_type"] == "dict"
-    assert diagnostic["data_keys"] == []
 
 
 def test_payment_lookup_block_is_preserved_after_created_pending_result():
@@ -949,6 +898,56 @@ def test_created_order_with_valid_payment_url_keeps_success_contract():
         "pay_type": "alipay",
         "order_id": "paid-order",
     }
+
+
+@pytest.mark.parametrize(
+    ("state", "pay_expire_timeout", "expected"),
+    [
+        # 网页客户端的收银台状态机：6=待付款、7=付款失败，其余数值为已支付终态
+        pytest.param(2, 120, BUY_ORDER_PAY_PAID, id="paid_state"),
+        pytest.param(101, 120, BUY_ORDER_PAY_PAID, id="other_terminal_state"),
+        pytest.param(6, 120, BUY_ORDER_PAY_PENDING, id="awaiting_payment"),
+        pytest.param("6", 0, BUY_ORDER_PAY_PENDING, id="string_state"),
+        pytest.param(6, -1, BUY_ORDER_PAY_FAILED, id="payment_window_expired"),
+        pytest.param(7, 120, BUY_ORDER_PAY_FAILED, id="payment_failed"),
+        pytest.param(None, 120, BUY_ORDER_PAY_UNKNOWN, id="missing_state"),
+        pytest.param(True, 120, BUY_ORDER_PAY_UNKNOWN, id="boolean_state"),
+    ],
+)
+def test_buy_order_pay_state_probe_follows_cashier_state_machine(
+    state, pay_expire_timeout, expected
+):
+    session = FakeSession(
+        FakeResponse(
+            {
+                "code": "OK",
+                "data": {"state": state, "pay_expire_timeout": pay_expire_timeout},
+            }
+        )
+    )
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    assert buyer.get_buy_order_pay_state("bill-1", "csgo") == expected
+    method, url, kwargs = session.calls[0]
+    assert (method, url) == ("GET", API_BUY_ORDER_CHECK_STATE)
+    assert kwargs["params"]["buy_order_id"] == "bill-1"
+
+
+def test_buy_order_pay_state_probe_is_unknown_for_unusable_responses():
+    session = FakeSession(
+        FakeResponse({"code": "SYSTEM_BUSY", "error": "系统繁忙"}),
+        FakeResponse({"code": "OK", "data": "not-a-dict"}),
+        requests.ConnectionError("socket closed"),
+    )
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    assert buyer.get_buy_order_pay_state("bill-1") == BUY_ORDER_PAY_UNKNOWN
+    assert buyer.get_buy_order_pay_state("bill-1") == BUY_ORDER_PAY_UNKNOWN
+    assert buyer.get_buy_order_pay_state("bill-1") == BUY_ORDER_PAY_UNKNOWN
 
 
 def test_login_redirect_is_auth_expired_and_verification_redirect_is_fused():

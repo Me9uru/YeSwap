@@ -5,7 +5,6 @@ from app.strategies.catalog import StrategyError
 from app.strategies.management import (
     activate_strategy,
     delete_strategy,
-    export_strategy,
     get_strategy_payload,
     import_strategy,
     save_strategy,
@@ -76,14 +75,6 @@ def api_activate_strategy(strategy_id: str, body: ActivateBody):
 def api_import_strategy(body: ImportBody):
     try:
         return {"ok": True, "strategy": import_strategy(body.strategy)}
-    except StrategyError as exc:
-        return _error(exc)
-
-
-@router.get("/api/strategies/{strategy_id}/export")
-def api_export_strategy(strategy_id: str):
-    try:
-        return {"ok": True, "strategy": export_strategy(strategy_id)}
     except StrategyError as exc:
         return _error(exc)
 

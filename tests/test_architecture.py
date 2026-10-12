@@ -1,6 +1,7 @@
 """Dependency boundaries that keep business modules independently testable."""
 
 import ast
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,7 +31,6 @@ def test_services_and_business_modules_do_not_depend_on_http_routes():
         "accounts",
         "background",
         "configuration",
-        "gifts",
         "maintenance",
         "notifications",
         "purchase",
@@ -52,6 +52,17 @@ def test_application_root_contains_only_entry_modules():
     allowed = {"__init__.py", "__main__.py", "api.py", "main.py", "runtime_env.py"}
     actual = {path.name for path in (ROOT / "app").glob("*.py")}
     assert actual == allowed
+
+
+def test_web_runtime_does_not_depend_on_desktop_shell():
+    data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = data["project"]["dependencies"]
+    assert not any(dependency.lower().startswith("pywebview") for dependency in dependencies)
+
+    launcher_modules = {module.split(".", 1)[0] for module in imports(ROOT / "app" / "main.py")}
+    assert launcher_modules.isdisjoint({"webview", "webbrowser"}), (
+        "Keep the entry point a pure web server: " + ", ".join(sorted(launcher_modules))
+    )
 
 
 def test_business_package_initializers_do_not_reexport_implementations():

@@ -275,16 +275,3 @@ def db_update_sale(idx: int, data: dict) -> bool:
             session.commit()
             return True
     return False
-
-
-def db_delete_sale_by_id(db_id: int) -> bool:
-    """Delete by primary ID, O(1) operation."""
-    if not db_id:
-        return False
-    with get_session() as session:
-        row = session.get(Sale, db_id)
-        if row is None:
-            return False
-        session.delete(row)
-        session.commit()
-        return True

@@ -176,11 +176,6 @@ def test_delist_rejects_obvious_failure_after_http_200(
             raise ValueError("not json")
 
     class Session:
-        def __init__(self):
-            self.headers = {}
-            self.cookies = {}
-            self.verify = True
-
         def get(self, *args, **kwargs):
             if kwargs.get("params"):
                 return type(
@@ -218,7 +213,7 @@ def test_delist_rejects_obvious_failure_after_http_200(
             "steam_id": "steam-id",
         },
     )
-    monkeypatch.setattr(steam_delist.requests, "Session", Session)
+    monkeypatch.setattr(steam_delist, "build_steam_session", lambda **_kwargs: Session())
     monkeypatch.setattr(
         steam_delist,
         "_get_assetids_by_class_instance",

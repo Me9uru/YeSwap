@@ -45,21 +45,6 @@ def test_新版订单簿缺少非CNY汇率会报清晰原因(monkeypatch):
     assert "exchange_rate.json" in error
 
 
-def test_汇率文件与ECurrency映射表双向一致():
-    from steam import market_orders
-
-    rate_codes = {
-        "USD", "INR", "RUB", "HKD", "EUR", "KZT", "UAH", "TRY", "ARS",
-        "VND", "IDR", "BRL", "CLP", "JPY", "PHP",
-    }
-    steam_codes = set(market_orders._STEAM_CURRENCY_CODES.values())
-
-    # 汇率文件里的 Steam 市场币种都必须有 ECurrency 映射
-    assert rate_codes <= steam_codes
-    # 汇率文件包含的非 Steam 本地市场币种不能被误映射为 Steam 币种
-    assert "PKR" not in steam_codes
-    assert "AZN" not in steam_codes
-
 
 def test_新版订单簿按querykey精确匹配请求的market_hash_name():
     import json

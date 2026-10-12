@@ -52,7 +52,7 @@ const catalog = ref({ strategies: [], modules: [], active: {}, limits: {} });
 const view = ref("buy"),
   draft = ref(null),
   snapshot = ref(""),
-  selected = ref(0),
+  expanded = ref(-1),
   results = ref([]),
   simulated = ref("");
 const picker = ref(false),
@@ -73,8 +73,6 @@ const modules = computed(() =>
         .includes(query.value.toLowerCase()),
   ),
 );
-const currentStep = computed(() => draft.value?.steps[selected.value]);
-const currentModule = computed(() => moduleFor(currentStep.value?.module_id));
 const dirty = computed(
   () => !!draft.value && strategySignature(draft.value) !== snapshot.value,
 );
@@ -102,10 +100,13 @@ function moduleFor(id) {
 }
 function setDraft(strategy) {
   draft.value = strategy ? clone(strategy) : null;
-  selected.value = 0;
+  expanded.value = -1;
   snapshot.value = strategySignature(draft.value);
   results.value = [];
   simulated.value = "";
+}
+function toggleStep(index) {
+  expanded.value = expanded.value === index ? -1 : index;
 }
 async function beforeLeave() {
   return (
@@ -218,10 +219,11 @@ function changeSteps(action) {
   );
   if (validation.length) {
     ElMessage.warning(validation.join("；"));
-    return;
+    return false;
   }
   draft.value = next;
-  selected.value = Math.min(selected.value, next.steps.length - 1);
+  if (expanded.value >= next.steps.length) expanded.value = -1;
+  return true;
 }
 function move(index, target) {
   if (
@@ -238,11 +240,18 @@ function move(index, target) {
       .some((s) => fixedStep(s, draft.value))
   )
     return;
-  changeSteps((steps) => {
-    const [step] = steps.splice(index, 1);
-    steps.splice(target, 0, step);
-  });
-  selected.value = target;
+  if (
+    !changeSteps((steps) => {
+      const [step] = steps.splice(index, 1);
+      steps.splice(target, 0, step);
+    })
+  )
+    return;
+  if (expanded.value === index) expanded.value = target;
+  else if (index < expanded.value && expanded.value <= target)
+    expanded.value -= 1;
+  else if (target <= expanded.value && expanded.value < index)
+    expanded.value += 1;
 }
 let dragged = -1;
 function add(module) {
@@ -251,7 +260,9 @@ function add(module) {
     (module.module_kind !== "declarative" || module.enabled === false)
   )
     return;
-  changeSteps((steps) => {
+  let at = -1;
+  const ok = changeSteps((steps) => {
+    const step = defaultStep(module);
     // 替换定价核心时同步移除其互斥项，其他冲突交给校验展示。
     if (
       ["pricing.steam_wall_price", "pricing.steam_wall_gap"].includes(module.id)
@@ -262,10 +273,11 @@ function add(module) {
         ),
       );
       if (index >= 0) {
-        steps.splice(index, 1, defaultStep(module));
+        steps.splice(index, 1, step);
         for (let i = steps.length - 1; i >= 0; i--)
           if ((module.conflicts || []).includes(steps[i].module_id))
             steps.splice(i, 1);
+        at = steps.indexOf(step);
         return;
       }
     }
@@ -277,8 +289,20 @@ function add(module) {
         "action.pause_auto_sell",
       ].includes(s.module_id),
     );
-    steps.splice(index < 0 ? steps.length : index, 0, defaultStep(module));
+    steps.splice(index < 0 ? steps.length : index, 0, step);
+    at = steps.indexOf(step);
   });
+  if (ok && at >= 0) expanded.value = at;
+}
+function removeStep(index) {
+  if (
+    !changeSteps((steps) => {
+      steps.splice(index, 1);
+    })
+  )
+    return;
+  if (expanded.value === index) expanded.value = -1;
+  else if (expanded.value > index) expanded.value -= 1;
 }
 function reset() {
   return run(async () => {
@@ -505,93 +529,96 @@ const vLoading = ElLoading.directive;
             :closable="false"
             class="space-bottom"
           />
-          <div class="step-editor">
-            <div>
-              <div class="toolbar">
-                <h3>执行模块 · {{ draft.steps.length }}</h3>
-                <el-button
-                  v-if="draft.origin !== 'system'"
-                  size="small"
-                  :disabled="busy"
-                  @click="picker = true"
-                >
-                  添加模块
-                </el-button>
-              </div>
-              <div
-                v-for="(step, index) in draft.steps"
-                :key="`${index}-${step.module_id}`"
-                class="step-row"
-                :class="{
-                  selected: selected === index,
-                  disabled: step.enabled === false,
-                }"
-                :draggable="!busy && !fixedStep(step, draft)"
-                @dragstart="dragged = index"
-                @dragover.prevent
-                @drop.prevent="
-                  move(dragged, index);
-                  dragged = -1;
+          <div class="toolbar">
+            <h3>执行模块 · {{ draft.steps.length }}</h3>
+            <el-button
+              v-if="draft.origin !== 'system'"
+              size="small"
+              :disabled="busy"
+              @click="picker = true"
+            >
+              添加模块
+            </el-button>
+          </div>
+          <div
+            v-for="(step, index) in draft.steps"
+            :key="`${index}-${step.module_id}`"
+            class="step-row"
+            :class="{
+              selected: expanded === index,
+              disabled: step.enabled === false,
+            }"
+            :draggable="!busy && !fixedStep(step, draft) && expanded !== index"
+            @dragstart="dragged = index"
+            @dragover.prevent
+            @drop.prevent="
+              move(dragged, index);
+              dragged = -1;
+            "
+            @dragend="dragged = -1"
+          >
+            <button
+              class="step-select"
+              :aria-expanded="expanded === index"
+              @click="toggleStep(index)"
+            >
+              <span class="step-number">{{ index + 1 }}</span>
+              <span>
+                {{ moduleFor(step.module_id).name }}
+                <small>
+                  {{ fixedStep(step, draft) ? "固定模块" : "可拖动排序" }}
+                </small>
+              </span>
+              <span class="step-toggle" aria-hidden="true">
+                {{ expanded === index ? "▾" : "▸" }}
+              </span>
+            </button>
+            <div class="step-actions" v-if="!fixedStep(step, draft)">
+              <el-switch
+                :model-value="step.enabled !== false"
+                size="small"
+                :disabled="busy"
+                @change="
+                  (value) =>
+                    changeSteps((steps) => {
+                      steps[index].enabled = value;
+                    })
                 "
-                @dragend="dragged = -1"
+              />
+              <el-button
+                text
+                size="small"
+                :disabled="busy || index === 0"
+                aria-label="上移模块"
+                @click="move(index, index - 1)"
               >
-                <button class="step-select" @click="selected = index">
-                  <span class="step-number">{{ index + 1 }}</span>
-                  <span>
-                    {{ moduleFor(step.module_id).name }}
-                    <small>
-                      {{ fixedStep(step, draft) ? "固定模块" : "可拖动排序" }}
-                    </small>
-                  </span>
-                </button>
-                <div class="step-actions" v-if="!fixedStep(step, draft)">
-                  <el-switch
-                    :model-value="step.enabled !== false"
-                    size="small"
-                    :disabled="busy"
-                    @change="
-                      (value) =>
-                        changeSteps((steps) => {
-                          steps[index].enabled = value;
-                        })
-                    "
-                  />
-                  <el-button
-                    text
-                    size="small"
-                    :disabled="busy || index === 0"
-                    aria-label="上移模块"
-                    @click="move(index, index - 1)"
-                  >
-                    ↑
-                  </el-button>
-                  <el-button
-                    text
-                    size="small"
-                    :disabled="busy || index === draft.steps.length - 1"
-                    aria-label="下移模块"
-                    @click="move(index, index + 1)"
-                  >
-                    ↓
-                  </el-button>
-                  <el-button
-                    text
-                    type="danger"
-                    size="small"
-                    :disabled="busy"
-                    @click="changeSteps((steps) => steps.splice(index, 1))"
-                  >
-                    移除
-                  </el-button>
-                </div>
-              </div>
+                ↑
+              </el-button>
+              <el-button
+                text
+                size="small"
+                :disabled="busy || index === draft.steps.length - 1"
+                aria-label="下移模块"
+                @click="move(index, index + 1)"
+              >
+                ↓
+              </el-button>
+              <el-button
+                text
+                type="danger"
+                size="small"
+                :disabled="busy"
+                @click="removeStep(index)"
+              >
+                移除
+              </el-button>
             </div>
             <StrategyParameterPane
-              v-if="currentStep"
-              :step="currentStep"
-              :module="currentModule"
+              v-if="expanded === index"
+              :step="step"
+              :module="moduleFor(step.module_id)"
               :busy="busy"
-              @update:param="(key, value) => (currentStep.params[key] = value)"
+              @update:param="(key, value) => (step.params[key] = value)"
             />
           </div>
         </el-card>
@@ -738,11 +765,6 @@ const vLoading = ElLoading.directive;
   background: var(--el-color-primary-light-9);
   border-color: var(--el-color-primary-light-5);
 }
-.step-editor {
-  display: grid;
-  grid-template-columns: minmax(230px, 1fr) minmax(200px, 0.85fr);
-  gap: 22px;
-}
 .step-row {
   border: 1px solid var(--el-border-color-lighter);
   border-radius: 8px;
@@ -774,6 +796,12 @@ const vLoading = ElLoading.directive;
   background: var(--el-fill-color);
   color: var(--muted);
 }
+.step-toggle {
+  margin-left: auto;
+  padding-left: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
 .step-actions {
   display: flex;
   justify-content: flex-end;
@@ -801,10 +829,5 @@ const vLoading = ElLoading.directive;
   line-height: 1.8;
   overflow-wrap: anywhere;
   padding-left: 20px;
-}
-@media (max-width: 700px) {
-  .step-editor {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

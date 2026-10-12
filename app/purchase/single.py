@@ -9,7 +9,13 @@ from app.services.buff_checkout_guard import (
     update_checkout,
 )
 from app.services.buff_auth import get_buff_auth_lock
-from buff import BuffAuthExpired, BuffRequestBlocked, BuffWriteResultUnknown
+from buff import (
+    BUY_ORDER_PAY_FAILED,
+    BUY_ORDER_PAY_PAID,
+    BuffAuthExpired,
+    BuffRequestBlocked,
+    BuffWriteResultUnknown,
+)
 from app.purchase.models import (
     PurchaseContext,
     _PurchaseAttempt,
@@ -20,9 +26,11 @@ from app.purchase.identity import (
     _checkout_credential_identity,
 )
 from app.purchase.settlement import (
+    _append_paid_single_order,
     _do_wait_payment_and_append,
 )
 from app.purchase.payment import (
+    _confirm_passwordless_payment,
     _supports_keyword_argument,
 )
 
@@ -110,6 +118,22 @@ def _try_single_buy(ctx: PurchaseContext) -> _PurchaseAttempt:
                     _PurchaseAttemptStatus.UNKNOWN_AFTER_SEND, reason=str(e) or "锁单网络/接口异常"
                 )
     if not result or not result.get("success"):
+        created_order_id = (
+            str(result.get("order_id") or "") if result else ""
+        )
+        if (
+            result
+            and result.get("created") is True
+            and created_order_id
+            and not result.get("pay_url")
+        ):
+            return _handle_created_order_without_pay_url(
+                ctx,
+                checkout_intent_id,
+                created_order_id,
+                p,
+                str(o.get("id") or ""),
+            )
         attempt = _classify_failure(result)
         if attempt.status in {
             _PurchaseAttemptStatus.UNKNOWN_AFTER_SEND,
@@ -150,19 +174,12 @@ def _try_single_buy(ctx: PurchaseContext) -> _PurchaseAttempt:
             _PurchaseAttemptStatus.UNKNOWN_AFTER_SEND, reason="锁单返回成功但缺少订单号"
         )
     if not pay_url:
-        identity = _checkout_credential_identity(ctx.buff_client)
-        update_checkout(
-            expected_intent_id=checkout_intent_id,
-            stage="order_created_pending",
-            order_id=order_id,
-            reason="订单已创建但未取得支付链接",
-            credential_generation=identity.get("credential_generation", 0),
-            credential_fingerprint=str(identity.get("credential_fingerprint") or ""),
-        )
-        return _PurchaseAttempt(
-            _PurchaseAttemptStatus.CREATED_NOT_PAID,
-            reason="订单已创建但未取得支付链接",
-            order_id=order_id,
+        return _handle_created_order_without_pay_url(
+            ctx,
+            checkout_intent_id,
+            order_id,
+            p,
+            str(o.get("id") or ""),
         )
     if ctx.log_fn:
         ctx.log_fn(f"[Buff]   → 锁单成功 order_id={order_id} 等待用户确认付款…", "info")
@@ -186,7 +203,6 @@ def _try_single_buy(ctx: PurchaseContext) -> _PurchaseAttempt:
         result.get("pay_type") or "alipay",
         order_id,
         checkout_intent_id,
-        ctx.acc,
         ctx.set_pending_payment,
         ctx.wait_payment_confirm,
         ctx.confirm_payment,
@@ -211,3 +227,93 @@ def _try_single_buy(ctx: PurchaseContext) -> _PurchaseAttempt:
             order_id=order_id,
         )
     return _PurchaseAttempt(_PurchaseAttemptStatus.SUCCESS, amount=paid, order_id=order_id)
+
+
+def _handle_created_order_without_pay_url(
+    ctx: PurchaseContext,
+    checkout_intent_id: str,
+    order_id: str,
+    price: float,
+    sell_order_id: str,
+) -> _PurchaseAttempt:
+    """处理「订单已创建但没有支付链接」的结果。
+
+    免密支付（网易宝快捷代扣）会由 BUFF 在订单创建后自动扣款，此时拿不到
+    支付链接。这里只读轮询收银台付款状态：只有明确已支付才继续结算；付款
+    失败（订单已关闭、未产生扣款）时解除对账门禁；其余结果（等待窗口内未
+    确认、查询异常、用户停止）一律保持人工对账门禁，绝不推断为成功。
+    """
+
+    identity = _checkout_credential_identity(ctx.buff_client)
+    update_checkout(
+        expected_intent_id=checkout_intent_id,
+        stage="payment_pending",
+        order_id=order_id,
+        reason="订单已创建，正在确认免密支付状态",
+        credential_generation=identity.get("credential_generation", 0),
+        credential_fingerprint=str(identity.get("credential_fingerprint") or ""),
+    )
+    if ctx.log_fn:
+        ctx.log_fn(
+            f"[Buff]   → 未取得支付链接，正在确认免密支付状态 order_id={order_id}…",
+            "info",
+        )
+    confirmation = _confirm_passwordless_payment(
+        ctx.buff_client,
+        order_id,
+        ctx.game_buff,
+        ctx.is_stop_requested,
+        ctx.log_fn,
+    )
+    if confirmation == BUY_ORDER_PAY_PAID:
+        if ctx.log_fn:
+            ctx.log_fn(
+                f"[Buff]   → 免密支付已确认 order_id={order_id}，无需人工付款，直接进入结算",
+                "info",
+            )
+        paid = _append_paid_single_order(
+            ctx.buff_client,
+            ctx.item,
+            ctx.config,
+            price,
+            1,
+            ctx.goods_id,
+            order_id,
+            checkout_intent_id,
+            ctx.append_purchase,
+            ctx.log_fn,
+            ctx.game_buff,
+            sell_order_id=sell_order_id,
+            market_price=ctx.ref_price,
+        )
+        return _PurchaseAttempt(
+            _PurchaseAttemptStatus.SUCCESS, amount=paid, order_id=order_id
+        )
+    if confirmation == BUY_ORDER_PAY_FAILED:
+        resolve_checkout(
+            "single_order_payment_failed",
+            expected_intent_id=checkout_intent_id,
+        )
+        if ctx.log_fn:
+            ctx.log_fn(
+                f"[Buff]   → 免密支付失败，订单 {order_id} 未产生扣款",
+                "warn",
+            )
+        return _PurchaseAttempt(
+            _PurchaseAttemptStatus.FAILED,
+            reason="免密支付失败且订单未完成",
+            order_id=order_id,
+        )
+    update_checkout(
+        expected_intent_id=checkout_intent_id,
+        stage="order_created_pending",
+        order_id=order_id,
+        reason="订单已创建但未取得支付链接，免密支付状态未确认",
+        credential_generation=identity.get("credential_generation", 0),
+        credential_fingerprint=str(identity.get("credential_fingerprint") or ""),
+    )
+    return _PurchaseAttempt(
+        _PurchaseAttemptStatus.CREATED_NOT_PAID,
+        reason="订单已创建但未取得支付链接",
+        order_id=order_id,
+    )

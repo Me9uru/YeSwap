@@ -295,9 +295,3 @@ def is_strategy_module_enabled(
     if not runtime:
         return default
     return module_id in set(runtime.get("enabled_modules") or [])
-
-
-def get_strategy_module_params(config: dict, strategy_type: str, module_id: str) -> dict:
-    runtime = ((config or {}).get("_strategy_runtime") or {}).get(strategy_type) or {}
-    params = (runtime.get("params") or {}).get(module_id)
-    return params if isinstance(params, dict) else {}

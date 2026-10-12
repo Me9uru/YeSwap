@@ -1,5 +1,4 @@
 <script setup>
-import "element-plus/es/components/empty/style/css";
 import "element-plus/es/components/form/style/css";
 import "element-plus/es/components/form-item/style/css";
 import "element-plus/es/components/input/style/css";
@@ -7,7 +6,6 @@ import "element-plus/es/components/option/style/css";
 import "element-plus/es/components/select/style/css";
 import "element-plus/es/components/switch/style/css";
 import {
-  ElEmpty,
   ElForm,
   ElFormItem,
   ElInput,
@@ -26,9 +24,12 @@ defineEmits(["update:param"]);
 </script>
 <template>
   <div class="parameter-pane">
-    <h3>{{ module.name }}</h3>
     <p class="muted">{{ module.description }}</p>
-    <el-form label-position="top" :disabled="busy">
+    <el-form
+      v-if="Object.keys(module.params_schema || {}).length"
+      label-position="top"
+      :disabled="busy"
+    >
       <el-form-item
         v-for="(meta, key) in module.params_schema"
         :key="key"
@@ -78,22 +79,13 @@ defineEmits(["update:param"]);
         />
       </el-form-item>
     </el-form>
-    <el-empty
-      v-if="!Object.keys(module.params_schema || {}).length"
-      description="该模块没有可编辑参数"
-      :image-size="55"
-    />
+    <p v-else class="muted">该模块没有可编辑参数。</p>
   </div>
 </template>
 <style scoped>
 .parameter-pane {
-  border-left: 1px solid var(--el-border-color-lighter);
-  padding-left: 22px;
-}
-@media (max-width: 700px) {
-  .parameter-pane {
-    border: 0;
-    padding: 0;
-  }
+  border-top: 1px solid var(--el-border-color-lighter);
+  margin-top: 10px;
+  padding-top: 10px;
 }
 </style>

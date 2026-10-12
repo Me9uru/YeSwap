@@ -177,12 +177,6 @@ class ProxyManager:
             result = {"http": url, "https": url}
             _pm_log(f"[ProxyManager] 加权随机选到代理: {p.get('host')}:{p.get('port')}")
             return result
-    def should_use_proxy_on_failure(self) -> bool:
-        """策略1：请求失败后才用代理。"""
-        return self.is_proxy_enabled() and self.get_strategy() == 1
-    def should_always_use_proxy(self) -> bool:
-        """策略2：一直走代理。"""
-        return self.is_proxy_enabled() and self.get_strategy() == 2
     def get_proxies_for_request(self, failed: bool = False) -> Optional[dict]:
         """
         根据策略返回适当的 proxies dict：

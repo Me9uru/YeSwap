@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 
 from app.workflows import schedule as pipeline
-from app.configuration.schema import DEFAULTS, validate_and_fill
 
 
 def test_offset_fallback_works_when_iana_timezone_is_invalid():
@@ -56,21 +55,3 @@ def test_overnight_and_equal_windows_have_explicit_semantics():
     assert pipeline._is_in_time_window(
         8, 8, datetime(2026, 7, 9, 3, 0)
     )
-
-
-def test_runtime_config_coerces_string_boolean_and_invalid_hours():
-    validated = validate_and_fill(
-        {
-            "pipeline": {
-                "start_time_limit_enabled": "false",
-                "start_time_hour": None,
-                "end_time_hour": "21",
-            }
-        }
-    )
-
-    assert validated["pipeline"]["start_time_limit_enabled"] is False
-    assert validated["pipeline"]["start_time_hour"] == (
-        DEFAULTS["pipeline"]["start_time_hour"]
-    )
-    assert validated["pipeline"]["end_time_hour"] == 21

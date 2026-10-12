@@ -4,7 +4,56 @@ from __future__ import annotations
 import inspect
 import threading
 from typing import Any, Callable, Dict, Optional
-from app.notifications.service import send_pushplus, build_payment_notify_content, wait_email_command
+from app.notifications.service import wait_email_command
+from buff import BUY_ORDER_PAY_FAILED, BUY_ORDER_PAY_PAID
+from utils.delay import jittered_sleep
+
+
+# 免密支付确认窗口：订单创建且拿不到支付链接后，立即查询一次付款状态，
+# 再按固定节奏重试；实际间隔还会叠加 BUFF 请求节流的最小间隔。
+PASSWORDLESS_PAYMENT_POLL_DELAYS = (0.0, 1.5, 2.5, 4.0, 5.0, 6.0, 8.0)
+
+
+def _confirm_passwordless_payment(
+    buff_client: Any,
+    order_id: str,
+    game: str,
+    is_stop_requested: Optional[Callable[[], bool]],
+    log_fn: Optional[Callable[[str, str], None]],
+) -> Optional[str]:
+    """确认免密（自动扣款）支付的最终结果。
+
+    只读轮询 BUFF 买单付款状态；返回 ``BUY_ORDER_PAY_PAID`` /
+    ``BUY_ORDER_PAY_FAILED``，等待窗口内未确认或查询异常时返回 ``None``。
+    只有明确已支付才允许继续结算，其余结果都必须退回人工对账门禁。
+    """
+
+    for delay in PASSWORDLESS_PAYMENT_POLL_DELAYS:
+        if is_stop_requested is not None and is_stop_requested():
+            return None
+        if delay > 0:
+            jittered_sleep(delay, is_cancelled=is_stop_requested)
+            if is_stop_requested is not None and is_stop_requested():
+                return None
+        try:
+            state = buff_client.get_buy_order_pay_state(str(order_id), game)
+        except Exception as exc:
+            if log_fn:
+                log_fn(
+                    f"[Buff]   → 免密支付状态查询异常 ({type(exc).__name__}: {exc})，保持人工对账门禁",
+                    "warn",
+                )
+            return None
+        if state == BUY_ORDER_PAY_PAID:
+            return BUY_ORDER_PAY_PAID
+        if state == BUY_ORDER_PAY_FAILED:
+            return BUY_ORDER_PAY_FAILED
+    if log_fn:
+        log_fn(
+            "[Buff]   → 免密支付状态未在等待窗口内确认，保持人工对账门禁",
+            "warn",
+        )
+    return None
 
 
 def _supports_keyword_argument(callable_obj: Any, name: str) -> bool:
@@ -21,12 +70,9 @@ def _supports_keyword_argument(callable_obj: Any, name: str) -> bool:
 def _do_payment_notify_and_wait(
     item: Dict[str, Any],
     config: dict,
-    unit_price: float,
-    num: int,
     pay_url: str,
     pay_type: str,
     order_id: str,
-    acc: float,
     set_pending_payment: callable,
     wait_payment_confirm: callable,
     confirm_payment: callable,
@@ -34,7 +80,7 @@ def _do_payment_notify_and_wait(
     log_fn: Optional[Callable[[str, str], None]],
     on_entering_payment: Optional[Callable[[], None]] = None,
 ) -> bool:
-    """Handle notification and wait for user payment confirmation.
+    """Handle the pending-payment state and wait for user payment confirmation.
     Returns True if user confirmed, False on cancel/timeout/stop.
     """
     name = item.get("name", "")
@@ -50,42 +96,6 @@ def _do_payment_notify_and_wait(
         if on_entering_payment:
             on_entering_payment()
         notify_cfg = config.get("notify") or {}
-        push_token = (notify_cfg.get("pushplus_token") or "").strip()
-        if push_token:
-            sell_ratio = None
-            value_ratio = item.get("value_ratio")
-            try:
-                rv = item.get("ratio")
-                if rv is not None:
-                    if isinstance(rv, str):
-                        rv = rv.strip().replace("%", "")
-                    sell_ratio = float(rv)
-            except (TypeError, ValueError):
-                pass
-            mhn = (item.get("steam_market_name") or item.get("name") or "").strip()
-            sl = item.get("steam_link")
-            content = build_payment_notify_content(
-                name,
-                unit_price,
-                pay_url,
-                pay_type,
-                acc,
-                sell_ratio=sell_ratio,
-                num=num,
-                value_ratio=value_ratio,
-                steam_market_hash_name=mhn,
-                steam_link=sl,
-            )
-            try:
-                if send_pushplus(push_token, "Buff 待付款", content):
-                    if log_fn:
-                        log_fn("[Buff]   → PushPlus 推送已发送", "info")
-                else:
-                    if log_fn:
-                        log_fn("[Buff]   → PushPlus 推送发送失败 (返回False)", "warn")
-            except Exception as e:
-                if log_fn:
-                    log_fn(f"[Buff]   → PushPlus 推送发送异常: {e}", "warn")
         email_user = (notify_cfg.get("email_user") or "").strip()
         email_pass = (notify_cfg.get("email_pass") or "").strip()
         timeout_sec = int(notify_cfg.get("email_timeout_seconds", 300))

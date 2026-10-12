@@ -53,7 +53,6 @@ def _api_data_init_unlocked():
             "device_id": "",
         },
         "notify": {
-            "pushplus_token": "",
             "email_user": "",
             "email_pass": "",
             "imap_server": "",
@@ -71,7 +70,6 @@ def _api_data_init_unlocked():
     config_dir = DATA_DIR
     files_to_remove = [
         "exchange_rate.json",
-        "holdings_report_last.json",
         "steam_userdata.json",
         "transactions.json.bak",
         "buff_request_policy.json",

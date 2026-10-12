@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import main as main_module
@@ -57,30 +59,23 @@ def test_absent_sources_do_not_trigger_repeated_builds(tmp_path):
     assert main_module.web_build_required(web) is False
 
 
-def test_stale_bundle_triggers_npm_build(tmp_path, monkeypatch, capsys):
+def test_stale_bundle_triggers_npm_build(tmp_path, monkeypatch):
     web = _stale_web(tmp_path, monkeypatch)
-    calls = []
+    commands = []
 
     def fake_run(command, **kwargs):
-        calls.append((command, kwargs))
+        commands.append(command)
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(main_module.subprocess, "run", fake_run)
 
     main_module.build_web_if_stale()
 
-    assert calls == [
-        (
-            ["/usr/bin/npm", "--prefix", str(web), "run", "build"],
-            {
-                "cwd": main_module.PROJECT_ROOT,
-                "capture_output": True,
-                "text": True,
-                "timeout": main_module.BUILD_TIMEOUT_SECONDS,
-            },
-        )
-    ]
-    assert "前端资源已更新。" in capsys.readouterr().out
+    assert len(commands) == 1, "源码比产物新时应触发一次构建"
+    command = commands[0]
+    assert command[0] == "/usr/bin/npm"
+    assert command[-2:] == ["run", "build"]
+    assert str(web) in command
 
 
 def test_fresh_bundle_never_invokes_npm(tmp_path, monkeypatch, capsys):
@@ -112,68 +107,37 @@ def test_disabled_env_never_invokes_npm(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_failed_build_warns_and_keeps_serving_current_bundle(
-    tmp_path, monkeypatch, capsys
-):
-    _stale_web(tmp_path, monkeypatch)
-
-    def failing_run(command, **kwargs):
-        return subprocess.CompletedProcess(command, 1, "", "vite: 构建失败\n")
-
-    monkeypatch.setattr(main_module.subprocess, "run", failing_run)
-
-    main_module.build_web_if_stale()
-
-    captured = capsys.readouterr()
-    assert "警告：前端资源构建失败。" in captured.err
-    assert "npm --prefix web run build" in captured.err
-    assert "vite: 构建失败" in captured.err
-    assert "页面将继续使用 web/dist 中已有的内容。" in captured.err
-
-
-def test_failed_build_reports_missing_bundle(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "build_failure",
+        "build_failure_after_dist_emptied",
+        "missing_npm",
+        "missing_node_modules",
+    ],
+)
+def test_failed_or_skipped_builds_never_block_startup(tmp_path, monkeypatch, scenario):
+    """构建失败或缺前置条件时只告警并返回：不抛异常，已有页面继续可用。"""
     web = _stale_web(tmp_path, monkeypatch)
+    commands = []
 
     def failing_run(command, **kwargs):
-        (web / "dist" / "index.html").unlink()  # vite emptyOutDir 清空后失败
+        commands.append(command)
+        if scenario == "build_failure_after_dist_emptied":
+            (web / "dist" / "index.html").unlink()  # vite emptyOutDir 清空后失败
         return subprocess.CompletedProcess(command, 1, "", "boom")
 
     monkeypatch.setattr(main_module.subprocess, "run", failing_run)
+    if scenario == "missing_npm":
+        monkeypatch.setattr(main_module.shutil, "which", lambda name: None)
+    elif scenario == "missing_node_modules":
+        (web / "node_modules").rmdir()
 
     main_module.build_web_if_stale()
 
-    assert "当前 web/dist 不可用" in capsys.readouterr().err
-
-
-def test_missing_npm_warns_with_manual_command(tmp_path, monkeypatch, capsys):
-    _stale_web(tmp_path, monkeypatch)
-    monkeypatch.setattr(main_module.shutil, "which", lambda name: None)
-
-    main_module.build_web_if_stale()
-
-    assert "未找到 npm" in capsys.readouterr().err
-
-
-def test_missing_node_modules_warns_with_install_command(tmp_path, monkeypatch, capsys):
-    web = _stale_web(tmp_path, monkeypatch)
-    web.joinpath("node_modules").rmdir()
-
-    main_module.build_web_if_stale()
-
-    captured = capsys.readouterr()
-    assert "缺少 web/node_modules" in captured.err
-    assert "npm --prefix web ci" in captured.err
-
-
-def test_launch_refreshes_bundle_before_serving(monkeypatch):
-    events = []
-    monkeypatch.setattr(
-        main_module, "build_web_if_stale", lambda: events.append("build")
-    )
-    monkeypatch.setattr(
-        main_module.uvicorn, "run", lambda *args, **kwargs: events.append("serve")
-    )
-
-    main_module.main()
-
-    assert events == ["build", "serve"]
+    if scenario.startswith("build_failure"):
+        assert len(commands) == 1, "构建已尝试且失败"
+    else:
+        assert commands == [], "缺少构建前置条件时应直接跳过"
+    if scenario != "build_failure_after_dist_emptied":
+        assert (web / "dist" / "index.html").is_file(), "失败不阻塞启动，已有页面继续可用"

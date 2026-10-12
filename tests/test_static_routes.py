@@ -35,14 +35,3 @@ def test_static_route_blocks_path_traversal(tmp_path, monkeypatch):
     assert Path(response.path) == index
     assert Path(response.path) != secret
     assert response.headers["cache-control"] == "no-cache"
-
-
-def test_vue_entry_and_uncached_api_fetches():
-    root = Path(__file__).resolve().parent.parent
-    index_html = (root / "web" / "index.html").read_text(encoding="utf-8")
-    vite_config = (root / "web" / "vite.config.js").read_text(encoding="utf-8")
-    api_js = (root / "web" / "src" / "services" / "api.js").read_text(encoding="utf-8")
-
-    assert 'src="/src/main.js"' in index_html
-    assert 'outDir: "dist"' in vite_config
-    assert 'cache: "no-store"' in api_js

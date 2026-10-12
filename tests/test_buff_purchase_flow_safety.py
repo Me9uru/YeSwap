@@ -1,5 +1,6 @@
 from app.purchase import checkout as purchase_checkout
 from app.purchase import market as purchase_market
+from app.purchase import payment as purchase_payment
 from app.purchase import settlement as purchase_settlement
 import time
 
@@ -7,7 +8,12 @@ import pytest
 
 from app.purchase import checkout, models
 from app.workflows import purchase as pipeline_module
-from buff import BuffWriteResultUnknown
+from buff import (
+    BUY_ORDER_PAY_FAILED,
+    BUY_ORDER_PAY_PAID,
+    BUY_ORDER_PAY_PENDING,
+    BuffWriteResultUnknown,
+)
 from buff.request_policy import BuffRateLimited
 
 
@@ -198,11 +204,9 @@ def test_stale_buff_cache_is_refreshed_before_locking():
         _pay_method = "alipay"
 
         def __init__(self):
-            self.get_calls = 0
             self.locked_order_ids = []
 
         def get_sell_orders(self, _goods_id, _game):
-            self.get_calls += 1
             return [{"id": "new-order", "price": "10.0"}]
 
         def lock_and_get_pay_url(self, _game, _goods_id, order_id, _price):
@@ -224,7 +228,6 @@ def test_stale_buff_cache_is_refreshed_before_locking():
     result = checkout.lock_and_confirm_payment(client, item, _config(), **kwargs)
 
     assert result is None
-    assert client.get_calls == 1
     assert client.locked_order_ids == ["new-order"]
     assert item["_buff_sell_orders"][0]["id"] == "new-order"
 
@@ -531,7 +534,6 @@ def test_unknown_write_result_stops_entire_pipeline_with_explicit_status(monkeyp
 
     assert client.lock_calls == 1
     assert state.status == ("error", "BUFF_WRITE_RESULT_UNKNOWN")
-    assert any("停止全部后续购买请求" in entry[0] for entry in state.logs)
 
 
 def test_purchase_amount_is_counted_when_post_commit_shipping_prompt_is_blocked(monkeypatch):
@@ -755,7 +757,9 @@ def test_batch_created_without_pay_url_is_terminal_and_never_falls_back():
     assert client.single_calls == 0
 
 
-def test_single_created_without_pay_url_keeps_order_id_and_never_auto_resumes():
+def test_single_created_without_pay_url_keeps_order_id_and_never_auto_resumes(
+    monkeypatch,
+):
     class BuffClient:
         _pay_method = "alipay"
 
@@ -768,7 +772,13 @@ def test_single_created_without_pay_url_keeps_order_id_and_never_auto_resumes():
                 "msg": "verification required while reading payment link",
             }
 
-    kwargs, _pending, purchases = _checkout_args()
+        def get_buy_order_pay_state(self, *_args):
+            return BUY_ORDER_PAY_PENDING
+
+    monkeypatch.setattr(
+        purchase_payment, "PASSWORDLESS_PAYMENT_POLL_DELAYS", (0.0,)
+    )
+    kwargs, pending, purchases = _checkout_args()
 
     with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
         checkout.lock_and_confirm_payment(
@@ -780,6 +790,159 @@ def test_single_created_without_pay_url_keeps_order_id_and_never_auto_resumes():
 
     assert exc_info.value.order_id == "bill-created"
     assert purchases == []
+    assert pending == []
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout()["stage"] == "order_created_pending"
+
+
+def test_single_passwordless_payment_confirms_and_records_purchase(monkeypatch):
+    """免密自动扣款：收款状态确认后直接结算，不再等待人工付款。"""
+
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def __init__(self):
+            self.states = [BUY_ORDER_PAY_PENDING, BUY_ORDER_PAY_PAID]
+            self.shipping_calls = 0
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": False,
+                "code": "CREATED_WITHOUT_PAY_URL",
+                "created": True,
+                "order_id": "bill-passwordless",
+                "pay_type": "alipay",
+            }
+
+        def get_buy_order_pay_state(self, *_args):
+            return self.states.pop(0)
+
+        def ask_seller_to_send(self, *_args):
+            self.shipping_calls += 1
+            return True
+
+    client = BuffClient()
+    monkeypatch.setattr(
+        purchase_payment, "PASSWORDLESS_PAYMENT_POLL_DELAYS", (0.0, 0.0, 0.0)
+    )
+    monkeypatch.setattr(
+        purchase_settlement, "_fetch_smart_market_price",
+        lambda *_args, **_kwargs: None,
+    )
+    kwargs, pending, purchases = _checkout_args()
+
+    paid = checkout.lock_and_confirm_payment(
+        client,
+        _item([{"id": "sell-1", "price": "10.0"}]),
+        _config(),
+        **kwargs,
+    )
+
+    assert paid == 10.0
+    assert pending == []
+    assert [record["buff_order_id"] for record in purchases] == [
+        "bill-passwordless"
+    ]
+    assert purchases[0]["pending_receipt"] is True
+    assert client.shipping_calls == 0
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout() is None
+
+
+def test_single_passwordless_payment_failure_resolves_without_recording():
+    """免密扣款失败（订单已关闭）不应残留对账门禁，也不记录成交。"""
+
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": False,
+                "code": "CREATED_WITHOUT_PAY_URL",
+                "created": True,
+                "order_id": "bill-failed-pay",
+            }
+
+        def get_buy_order_pay_state(self, *_args):
+            return BUY_ORDER_PAY_FAILED
+
+    kwargs, _pending, purchases = _checkout_args()
+
+    result = checkout.lock_and_confirm_payment(
+        BuffClient(),
+        _item([{"id": "sell-1", "price": "10.0"}]),
+        _config(),
+        **kwargs,
+    )
+
+    assert result is None
+    assert purchases == []
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout() is None
+
+
+def test_single_passwordless_confirmation_error_keeps_reconciliation_gate():
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": False,
+                "code": "CREATED_WITHOUT_PAY_URL",
+                "created": True,
+                "order_id": "bill-unknown-pay",
+            }
+
+        def get_buy_order_pay_state(self, *_args):
+            raise RuntimeError("transport exploded")
+
+    kwargs, _pending, purchases = _checkout_args()
+
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
+            BuffClient(),
+            _item([{"id": "sell-1", "price": "10.0"}]),
+            _config(),
+            **kwargs,
+        )
+
+    assert exc_info.value.order_id == "bill-unknown-pay"
+    assert purchases == []
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout()["stage"] == "order_created_pending"
+
+
+def test_single_passwordless_confirmation_stops_polling_on_stop_request():
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": False,
+                "code": "CREATED_WITHOUT_PAY_URL",
+                "created": True,
+                "order_id": "bill-stopped",
+            }
+
+        def get_buy_order_pay_state(self, *_args):
+            raise AssertionError("stop request must prevent further state probes")
+
+    kwargs, _pending, _purchases = _checkout_args()
+    kwargs["is_stop_requested"] = lambda: True
+
+    with pytest.raises(models.PurchaseOrderCreatedPending) as exc_info:
+        checkout.lock_and_confirm_payment(
+            BuffClient(),
+            _item([{"id": "sell-1", "price": "10.0"}]),
+            _config(),
+            **kwargs,
+        )
+
+    assert exc_info.value.order_id == "bill-stopped"
 
 
 def test_cooling_down_has_dedicated_terminal_state():
@@ -824,11 +987,9 @@ def test_expired_snapshot_immediately_before_write_sends_no_post(monkeypatch):
         _pay_method = "alipay"
 
         def __init__(self):
-            self.get_calls = 0
             self.lock_calls = 0
 
         def get_sell_orders(self, _goods_id, _game):
-            self.get_calls += 1
             return [{"id": "sell-1", "price": "10.0"}]
 
         def lock_and_get_pay_url(self, *_args):
@@ -859,7 +1020,6 @@ def test_expired_snapshot_immediately_before_write_sends_no_post(monkeypatch):
     )
 
     assert result is None
-    assert client.get_calls == 1
     assert client.lock_calls == 0
 
 

@@ -1,19 +1,11 @@
 import json
-import os
 import re
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import parse_qs, quote, unquote, urlparse
-import requests
-import urllib3
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+from utils.delay import parse_retry_after
+from .session import build_steam_session
 CURRENCY_CNY = "CNY"
 CURRENCY_USD = "USD"
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://steamcommunity.com/market/",
-}
 _LISTING_URL_RE = re.compile(
     r"https?://steamcommunity\.com/market/listings/[^\s\])]+",
     re.I,
@@ -152,24 +144,6 @@ def _extract_group_market_hash_name(html: str, source_url: str = "") -> Optional
     return descriptions[0] if descriptions else None
 
 
-def _extract_line1(html: str) -> Optional[list]:
-    prefix = "var line1="
-    i = html.find(prefix)
-    if i == -1:
-        return None
-    start = i + len(prefix)
-    if start >= len(html) or html[start] != "[":
-        return None
-    depth = 0
-    for j in range(start, len(html)):
-        c = html[j]
-        if c == "[":
-            depth += 1
-        elif c == "]":
-            depth -= 1
-            if depth == 0:
-                return json.loads(html[start : j + 1])
-    return None
 def detect_currency(html: str) -> Optional[str]:
     s = html or ""
     upper = s.upper()
@@ -227,8 +201,8 @@ def resolve_market_hash_name_from_listing_url(
     if not _is_market_group_id(name):
         return name
     request_url = _coerce_listing_url(url)
-    client = session or requests.Session()
-    headers = {**DEFAULT_HEADERS, "Referer": request_url}
+    client = session or build_steam_session()
+    headers = {"Referer": request_url}
     kwargs = {
         "headers": headers,
         "timeout": timeout,
@@ -247,14 +221,6 @@ def resolve_market_hash_name_from_listing_url(
         return _extract_group_market_hash_name(getattr(resp, "text", "") or "", request_url)
     except Exception:
         return None
-def _parse_cookie_str(s: str) -> dict:
-    out = {}
-    for part in (s or "").split(";"):
-        part = part.strip()
-        if "=" in part:
-            k, _, v = part.partition("=")
-            out[k.strip()] = v.strip()
-    return out
 def fetch_history(
     market_hash_name: str,
     app_id: int = 730,
@@ -298,32 +264,17 @@ def fetch_history_with_meta(
     """
     encoded = quote(market_hash_name, safe="")
     url = f"https://steamcommunity.com/market/pricehistory/?appid={app_id}&market_hash_name={encoded}"
-    h = {**DEFAULT_HEADERS, **(headers or {})}
-    if proxies is None:
-        px = {}
-        if os.environ.get("HTTP_PROXY"):
-            px["http"] = os.environ["HTTP_PROXY"]
-        if os.environ.get("HTTPS_PROXY"):
-            px["https"] = os.environ["HTTPS_PROXY"]
-        proxies = px if px else None
-    if isinstance(cookies, str):
-        cookies = _parse_cookie_str(cookies)
+    session = build_steam_session(
+        cookies=cookies, headers=headers, verify=verify, proxies=proxies
+    )
     try:
-        resp = requests.get(
-            url,
-            headers=h,
-            verify=verify,
-            proxies=proxies,
-            cookies=cookies,
-            timeout=timeout,
-        )
+        resp = session.get(url, timeout=timeout)
         if resp.status_code != 200:
             retry_after = None
             if resp.status_code == 429:
-                try:
-                    retry_after = max(0.0, float(resp.headers.get("Retry-After", "")))
-                except (TypeError, ValueError):
-                    pass
+                raw = resp.headers.get("Retry-After")
+                if raw is not None:
+                    retry_after = parse_retry_after(raw, default=30.0)
             return None, resp.status_code, retry_after
         data = resp.json()
         if not data or not data.get("success") or "prices" not in data:

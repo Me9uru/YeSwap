@@ -10,7 +10,6 @@ def test_config_route_persists_all_settings_checkboxes(monkeypatch):
 
     state = {
         "pipeline": {"max_discount": 0.8},
-        "notify": {},
         "steam_confirm": {},
         "system": {},
     }
@@ -29,7 +28,6 @@ def test_config_route_persists_all_settings_checkboxes(monkeypatch):
         config.ConfigBody(
             config={
                 "pipeline": {"start_time_limit_enabled": True},
-                "notify": {"holdings_report_drop_enabled": False},
                 "steam_confirm": {"enabled": True},
                 "system": {"buff_session_keepalive_enabled": True},
             }
@@ -39,7 +37,6 @@ def test_config_route_persists_all_settings_checkboxes(monkeypatch):
     assert result["ok"] is True
     assert result["config"]["pipeline"]["max_discount"] == 0.8
     assert result["config"]["pipeline"]["start_time_limit_enabled"] is True
-    assert result["config"]["notify"]["holdings_report_drop_enabled"] is False
     assert result["config"]["steam_confirm"]["enabled"] is True
     assert result["config"]["system"]["buff_session_keepalive_enabled"] is True
 
@@ -55,18 +52,29 @@ def test_config_get_disables_http_caching(monkeypatch):
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_backup_export_omits_removed_game_deal_setting(monkeypatch):
+def test_backup_export_omits_removed_feature_settings(monkeypatch):
     from app.services import backup
 
     monkeypatch.setattr(
         backup,
         "load_app_config",
-        lambda: {"pipeline": {"max_discount": 0.8}, "steam_deals": {"enabled": True}},
+        lambda: {
+            "pipeline": {"max_discount": 0.8},
+            "steam_deals": {"enabled": True},
+            "notify": {
+                "pushplus_token": "secret",
+                "holdings_report_interval_hours": 6,
+                "email_user": "user@example.com",
+            },
+        },
     )
 
     exported = backup.api_export_full()
 
-    assert exported["app_config"] == {"pipeline": {"max_discount": 0.8}}
+    assert exported["app_config"] == {
+        "pipeline": {"max_discount": 0.8},
+        "notify": {"email_user": "user@example.com"},
+    }
 
 
 def test_full_import_uses_validated_config_save(monkeypatch):
@@ -169,12 +177,13 @@ def test_full_import_explicit_empty_sections_clear_only_those_sections(
     )
 
     assert result["ok"] is True
-    assert calls == [
+    # 顺序无关：指定为空的四个节各自收到一次清空调用，且无其他节被覆盖
+    assert sorted(calls) == sorted([
         ("credentials", {}),
         ("transactions", [], []),
         ("accounts", {}),
         ("log", []),
-    ]
+    ])
 
 
 def test_credentials_view_only_returns_editable_fields_without_cache(monkeypatch):

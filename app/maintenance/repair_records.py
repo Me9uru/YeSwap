@@ -10,8 +10,8 @@ from collections import defaultdict
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-import requests
 from bs4 import BeautifulSoup
+from steam.session import build_steam_session
 from utils.money import estimated_steam_gross_from_proceeds
 try:
     import urllib3
@@ -116,10 +116,10 @@ def _history_total_count(data: dict):
     return None
 def _fetch_sold_with_names(cookies: dict) -> tuple:
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "X-Requested-With": "XMLHttpRequest",
     }
+    session = build_steam_session(cookies=cookies, headers=headers)
     sold = {}
     sold_names = {}
     rate_map = _load_rate_map()
@@ -127,7 +127,7 @@ def _fetch_sold_with_names(cookies: dict) -> tuple:
     total_count = None
     for _ in range(HISTORY_MAX_PAGES):
         params = {"query": "", "start": start, "count": HISTORY_PAGE_SIZE, "contextid": 2, "appid": 730}
-        r = requests.get(MYHISTORY_RENDER_URL, params=params, headers=headers, cookies=cookies, verify=False, timeout=TIMEOUT)
+        r = session.get(MYHISTORY_RENDER_URL, params=params, timeout=TIMEOUT)
         if r.status_code != 200:
             raise RuntimeError(f"HTTP {r.status_code}")
         data = r.json() if r.text else {}

@@ -34,10 +34,16 @@ class SteamAuthTokenPending(RuntimeError):
 
 
 def _verify_steam_cookies_valid(cookie_str: str, steam_id: str = "") -> bool:
-    """Use an actual HTTP request to verify if Steam cookies are truly valid.
-    Returns True if cookies are valid, False if expired/invalid.
-    Uses the Steam Store JSON API for reliable detection without page rendering.
+    """用社区域名的真实请求确认 Cookie 是否仍然有效。
+
+    只有明确访问到已登录的个人资料页才返回 True；未登录、跳转登录页或无法判定
+    （例如网络异常）都返回 False，让调用方继续真实登录而不是复用旧 Cookie。
+    请求必须复用业务会话工厂（代理策略 + 浏览器指纹）：旧实现用直连 requests，
+    受限网络下只会超时并 fail-open 误判"有效"，导致到期 Cookie 永远跳过真实登录。
+    验证通过时顺带回写 jar 中轮换后的令牌（_persist_rotated_session_cookies）。
     """
+    from steam.session import build_steam_session, check_login_state
+
     cookie_dict = {}
     for part in (cookie_str or "").split(";"):
         s = part.strip()
@@ -46,60 +52,34 @@ def _verify_steam_cookies_valid(cookie_str: str, steam_id: str = "") -> bool:
             cookie_dict[k.strip()] = v.strip()
     if not cookie_dict.get("steamLoginSecure"):
         return False
-    session = _req.Session()
-    session.verify = False
-    session.cookies.update(cookie_dict)
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-    })
     try:
-        r = session.get(
-            "https://store.steampowered.com/pointssummary/ajaxgetasyncconfig",
-            timeout=12,
-        )
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                if isinstance(data, dict):
-                    if data.get("logged_in") is True:
-                        return True
-                    if data.get("logged_in") is False:
-                        return False
-            except Exception:
-                pass
+        session = build_steam_session(cookies=cookie_dict)
+        if check_login_state(session) is not True:
+            return False
     except Exception:
-        pass
+        return False
     try:
-        r2 = session.get(
-            "https://steamcommunity.com/my/profile",
-            timeout=12,
-            allow_redirects=True,
+        _persist_rotated_session_cookies(cookie_dict, session)
+    except Exception as exc:
+        log(
+            f"auto_relogin: 回写续期 Cookie 失败 {type(exc).__name__}: {exc}",
+            "debug",
+            category="steam",
         )
-        final_url = (r2.url or "").lower()
-        if "login" in final_url:
-            return False
-        if r2.status_code in (401, 403):
-            return False
-        return True
-    except Exception:
-        return True
+    return True
 def fetch_steam_profile_via_api(steam_id: str, cookies_str: str) -> tuple:
     if not steam_id:
         return "", ""
+    from steam.session import build_steam_session
+
     display_name, avatar_url = "", ""
-    session = _req.Session()
-    session.verify = False
     cookie_dict = {}
     for part in (cookies_str or "").split(";"):
         s = part.strip()
         if "=" in s:
             k, _, v = s.partition("=")
             cookie_dict[k.strip()] = v.strip()
-    session.cookies.update(cookie_dict)
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    })
+    session = build_steam_session(cookies=cookie_dict)
     try:
         r = session.get(f"https://steamcommunity.com/miniprofile/{int(steam_id) - 76561197960265728}/json", timeout=15)
         if r.status_code == 200:
@@ -156,15 +136,6 @@ def fetch_steam_profile_via_api(steam_id: str, cookies_str: str) -> tuple:
     except Exception:
         pass
     return display_name, avatar_url
-def _get_shared_secret() -> str:
-    try:
-        cfg = load_app_config_validated()
-        raw = ((cfg.get("steam_guard") or {}).get("shared_secret") or "").strip()
-        if raw:
-            return re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), raw)
-        return ""
-    except Exception:
-        return ""
 def _build_steam_guard_dict(cur: dict, cfg: dict) -> Optional[dict]:
     """Build the steam_guard dict that steampy SteamClient.login() expects.
     steampy accepts either a path to a .maFile or a dict with these fields:
@@ -330,6 +301,62 @@ def _steampy_pool_sessions_with_retry(self, client_id: str, request_id: str) -> 
     )
 
 
+def _session_cookie_dict(session, base: Optional[dict] = None) -> dict:
+    """合并会话 jar 中的 Cookie；社区域名的同名值优先于 store 域名。"""
+    preferred, fallback = {}, {}
+    for c in session.cookies.jar:
+        name = getattr(c, "name", "")
+        if not name:
+            continue
+        domain = str(getattr(c, "domain", "") or "").lower()
+        (preferred if "steamcommunity.com" in domain else fallback)[name] = c.value
+    return {**(base or {}), **fallback, **preferred}
+
+
+def _persist_rotated_session_cookies(previous: dict, session) -> None:
+    """验证通过后把 jar 中被 Steam 轮换的 Cookie 写回存储。
+
+    steamLoginSecure（约 24 小时 JWT）到期时 Steam 用 steamRefresh_steam 换发
+    新令牌；只放在本次会话里不回写，存储凭据到期后又只能跑密码登录。
+    """
+    merged = _session_cookie_dict(session, previous)
+    if not merged.get("steamLoginSecure"):
+        return
+    if all(
+        str(merged.get(key) or "") == str(previous.get(key) or "")
+        for key in ("sessionid", "steamLoginSecure", "steamRefresh_steam")
+    ):
+        return
+    cookie_str, session_id, _steam_id = _extract_creds_from_cookie_dict(merged)
+    update_steam_creds(cookie_str, session_id or "")
+    log("auto_relogin: 已回写 Steam 续期后的 Cookie", "debug", category="steam")
+
+
+def _ensure_community_session(cookie_dict: dict) -> Optional[dict]:
+    """登录后建立并确认社区域名会话。
+
+    steampy 的登录链路用 requests 指纹请求 steamcommunity.com，在受限网络与
+    代理出口下会被风控，社区域名的 steamLoginSecure 往往没有建立（只剩 store
+    域名的令牌），随后访问库存等社区接口会被当作未登录。这里用与业务一致的
+    浏览器指纹会话带完整 Cookie（含 steamRefresh_steam）访问 `/my/`：有效的
+    社区域名凭据直接通过，否则由 login.steampowered.com 的 jwt refresh 补齐。
+
+    返回补齐后的 Cookie；两次都确认不了社区域名登录态时返回 None——调用方必须
+    按失败处理，不能把未经确认的凭据当作"登录成功"存盘。
+    """
+    from steam.session import build_steam_session, check_login_state
+
+    for _ in range(2):
+        try:
+            session = build_steam_session(cookies=cookie_dict or {})
+            if check_login_state(session) is not True:
+                continue
+        except Exception:
+            continue
+        return _session_cookie_dict(session, cookie_dict)
+    return None
+
+
 def _do_steampy_login_once(
     username: str,
     password: str,
@@ -384,6 +411,12 @@ def _do_steampy_login_once(
         merged = {**store_cookies, **comm_cookies}
         if not merged.get('steamLoginSecure'):
             merged = rutils.dict_from_cookiejar(client._session.cookies)
+        merged = _ensure_community_session(merged)
+        if merged is None:
+            return False, (
+                'community_session_unavailable: 登录成功但社区域名会话未建立'
+                '（可能被风控拦截），请稍后重试'
+            ), {}
         return True, '', merged
     except Exception as e:
         err = str(e).lower()
@@ -616,19 +649,9 @@ def _try_steam_auto_relogin_impl() -> tuple:
         return True, "auto_ok", "已自动登录并更新凭证"
     if err_code == "wrong_creds":
         log("auto_relogin: 账号或密码错误", "warn", category="steam")
-        try:
-            from app.notifications.service import notify_manual_intervention_required
-            notify_manual_intervention_required("Steam", "系统保存的账号或密码不正确，登录被拒绝，请立刻前往修改密码并手动干预登录")
-        except Exception:
-            pass
         return False, "wrong_creds", "账号或密码错误"
     if err_code == "need_2fa":
         log("auto_relogin: 需要 2FA 但无 shared_secret 或令牌有误", "warn", category="steam")
-        try:
-            from app.notifications.service import notify_manual_intervention_required
-            notify_manual_intervention_required("Steam", "账号需要 2FA 验证，但 shared_secret 未配置或格式有误，请前往设置页补充 Steam Guard 密钥")
-        except Exception:
-            pass
         return False, "need_2fa", "需要二次验证且未配置 shared_secret，请配置后重试"
     if err_code == "captcha":
         log("auto_relogin: Steam 要求人机验证（Captcha），自动登录暂时失败", "warn", category="steam")
@@ -641,6 +664,14 @@ def _try_steam_auto_relogin_impl() -> tuple:
         msg = err_code.split(": ", 1)[1] if ": " in err_code else err_code
         log(f"auto_relogin: {msg}", "warn", category="steam")
         return False, "network_error", msg
+    if err_code.startswith("community_session_unavailable"):
+        msg = (
+            err_code.split(": ", 1)[1]
+            if ": " in err_code
+            else "登录成功但社区域名会话未建立，请稍后重试"
+        )
+        log(f"auto_relogin: {msg}", "warn", category="steam")
+        return False, "session_unavailable", msg
     log(f"auto_relogin: 登录失败 – {err_code}", "warn", category="steam")
     return False, "error", (err_code or "自动登录失败，请检查网络或手动重登")
 def verify_steam_auto_login(account_id: str) -> dict:
@@ -681,4 +712,11 @@ def verify_steam_auto_login(account_id: str) -> dict:
     if err_code.startswith("network_error:"):
         msg = err_code.split(": ", 1)[1] if ": " in err_code else err_code
         return {"ok": False, "status": "network_error", "message": msg}
+    if err_code.startswith("community_session_unavailable"):
+        msg = (
+            err_code.split(": ", 1)[1]
+            if ": " in err_code
+            else "登录成功但社区域名会话未建立，请稍后重试"
+        )
+        return {"ok": False, "status": "session_unavailable", "message": msg}
     return {"ok": False, "status": "error", "message": err_code or "验证失败"}

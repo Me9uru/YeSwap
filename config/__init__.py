@@ -55,7 +55,10 @@ def save_credentials(data: dict) -> None:
             incoming_buff["generation"] = current_generation + 1
         _atomic_write_json(_CREDENTIALS_FILE, saved)
         _cache = {}
-_STEAM_COOKIE_NAMES = ("sessionid", "steamCountry", "steamLoginSecure")
+# steamRefresh_steam 必须保留：steamLoginSecure 是约 24 小时过期的 JWT，浏览器
+# 靠刷新令牌经 login.steampowered.com/jwt/refresh 静默续期；过滤掉它会让存储
+# 凭据每次到期后失效，只能反复跑密码登录。
+_STEAM_COOKIE_NAMES = ("sessionid", "steamCountry", "steamLoginSecure", "steamRefresh_steam")
 def _filter_steam_cookies(cookie_str: str) -> str:
     seen = {}
     for part in cookie_str.split(";"):

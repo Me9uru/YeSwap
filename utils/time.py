@@ -1,11 +1,9 @@
 import re
-import time
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 STEAM_HISTORY_DATE_FMT = "%b %d %Y %H"
-STEAM_COOLDOWN_FMT = "%b %d, %Y %H:%M:%S"
 
 _STEAM_HISTORY_RE = re.compile(
     r"^\s*(?P<stamp>[A-Za-z]{3}\s+\d{1,2}\s+\d{4}\s+\d{1,2})"
@@ -95,23 +93,3 @@ def parse_steam_history_date(date_str: str) -> Optional[datetime]:
         return parsed.replace(tzinfo=parsed_timezone).astimezone(timezone.utc)
     except (TypeError, ValueError, IndexError):
         return None
-
-
-def parse_steam_cooldown(raw: str) -> Optional[datetime]:
-    try:
-        normalized = raw.replace(" (", " ").replace(")", "").strip()
-        normalized = re.sub(r"\s+GMT$", "", normalized, flags=re.IGNORECASE)
-        return datetime.strptime(
-            normalized,
-            STEAM_COOLDOWN_FMT,
-        ).replace(tzinfo=timezone.utc)
-    except (AttributeError, ValueError, TypeError):
-        return None
-
-
-def cutoff_days_ago(days: int) -> datetime:
-    return datetime.now(timezone.utc) - timedelta(days=days)
-
-
-def utc_timestamp() -> float:
-    return time.time()

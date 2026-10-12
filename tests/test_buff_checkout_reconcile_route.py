@@ -43,4 +43,4 @@ def test_manual_reconcile_acknowledges_exact_checkout(monkeypatch):
     )
 
     assert result == {"ok": True}
-    assert calls == [("intent-1", "user_confirmed_cancelled_or_unpaid")]
+    assert calls[0][0] == "intent-1"

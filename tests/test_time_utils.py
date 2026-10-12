@@ -1,11 +1,8 @@
-import time
-from datetime import timedelta, timezone
+from datetime import timezone
 
 import pytest
 
 from utils.time import (
-    cutoff_days_ago,
-    parse_steam_cooldown,
     parse_steam_history_date,
     resolve_configured_timezone,
     timestamp_in_configured_timezone,
@@ -45,27 +42,6 @@ def test_steam_history_utc_variants_are_timezone_aware(raw):
 )
 def test_invalid_steam_history_dates_are_rejected(raw):
     assert parse_steam_history_date(raw) is None
-
-
-def test_steam_cooldown_is_explicit_utc():
-    parsed = parse_steam_cooldown("Jul 09, 2026 04:16:03 GMT")
-
-    assert parsed is not None
-    assert parsed.tzinfo is timezone.utc
-    assert parsed.isoformat() == "2026-07-09T04:16:03+00:00"
-
-
-def test_cutoff_days_ago_is_aware_utc():
-    before = time.time()
-    cutoff = cutoff_days_ago(2)
-    after = time.time()
-
-    assert cutoff.tzinfo is timezone.utc
-    assert cutoff.timestamp() == pytest.approx(
-        (before + after) / 2 - 2 * 86400,
-        abs=0.1,
-    )
-    assert cutoff.utcoffset() == timedelta(0)
 
 
 def test_epoch_formatting_uses_configured_timezone_not_host_timezone():

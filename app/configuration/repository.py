@@ -53,12 +53,6 @@ def update_buff_creds(
     source: str = None,
 ) -> None:
     update_buff_credentials(cookies, user_agent=user_agent, source=source)
-def get_buff_credentials_generation() -> int:
-    """Return the credential revision used by long-lived BUFF clients."""
-    try:
-        return int((get_buff_credentials() or {}).get("generation", 0))
-    except (TypeError, ValueError):
-        return 0
 def load_app_config_validated() -> dict:
     global _config_cache, _config_cache_ts, _config_cache_revision
     now = _time.monotonic()

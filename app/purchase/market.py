@@ -250,19 +250,6 @@ def _compute_sell_pressure_from_orders(
     return base_pressure
 
 
-def _compute_sell_pressure(
-    market_hash_name: str,
-    daily_volume: int,
-    config: dict,
-    n_orders: int = 5,
-    app_id: int = 730,
-) -> Optional[float]:
-    data = _fetch_steam_sell_data(market_hash_name, config, app_id)
-    if not data or not data.get("sell_orders"):
-        return None
-    return _compute_sell_pressure_from_orders(data["sell_orders"], daily_volume, n_orders)
-
-
 def _fetch_smart_market_price(
     market_hash_name: str, config: dict, app_id: int = 730
 ) -> Optional[float]:

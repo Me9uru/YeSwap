@@ -8,19 +8,76 @@ from app.background.safety import (
 )
 
 
-def _session_keepalive_enabled(cfg: dict) -> bool:
+def _steam_keepalive_enabled(cfg: dict) -> bool:
+    return bool((cfg.get("system") or {}).get("steam_session_keepalive_enabled", False))
+
+
+def _buff_keepalive_enabled(cfg: dict) -> bool:
     return bool((cfg.get("system") or {}).get("buff_session_keepalive_enabled", False))
+
+
+def _any_keepalive_enabled(cfg: dict) -> bool:
+    return _steam_keepalive_enabled(cfg) or _buff_keepalive_enabled(cfg)
+
+
+def _keepalive_steam() -> None:
+    """探测 Steam 会话并在过期时自动重登；纯 HTTP，不打开浏览器。"""
+    from app.services.steam_auth import try_steam_auto_relogin
+
+    log("keepalive: 开始本轮 Steam 后台会话保活...", "info", category="keepalive")
+    try:
+        steam_ok, _steam_status, steam_msg = try_steam_auto_relogin()
+    except WorkerStopped:
+        raise
+    except Exception as e:
+        log(
+            f"keepalive: Steam 保活异常 {type(e).__name__}: {e}",
+            "warn",
+            category="keepalive",
+        )
+        return
+    if not steam_ok:
+        log(f"keepalive: Steam 保活未完成: {steam_msg}", "warn", category="keepalive")
+    else:
+        log(f"keepalive: Steam 保活成功: {steam_msg}", "info", category="keepalive")
+
+
+def _keepalive_buff() -> None:
+    from app.services.buff_auth import try_buff_auto_relogin
+
+    log("keepalive: 开始本轮 Buff 后台会话保活...", "info", category="keepalive")
+    try:
+        buff_ok, _buff_status, buff_msg = try_buff_auto_relogin()
+    except WorkerStopped:
+        raise
+    except Exception as e:
+        log(
+            f"keepalive: Buff 保活异常 {type(e).__name__}: {e}",
+            "warn",
+            category="keepalive",
+        )
+        return
+    if not buff_ok:
+        log(f"keepalive: Buff 保活未完成: {buff_msg}", "warn", category="keepalive")
+    else:
+        log(f"keepalive: Buff 保活成功: {buff_msg}", "info", category="keepalive")
+
+
+def _keepalive_sessions(cfg: dict) -> None:
+    """依次保活 Steam 与 BUFF 会话；两者开关独立，单个失败不影响另一个。"""
+    if _steam_keepalive_enabled(cfg):
+        _keepalive_steam()
+    if _buff_keepalive_enabled(cfg):
+        _keepalive_buff()
 
 
 @stoppable_worker
 def session_keepalive_worker() -> None:
-    from app.services.buff_auth import try_buff_auto_relogin
-
     while True:
         try:
             cfg = load_app_config_validated()
-            if not _session_keepalive_enabled(cfg):
-                # Poll the opt-in switch without touching either remote service.
+            if not _any_keepalive_enabled(cfg):
+                # Poll the opt-in switches without touching either remote service.
                 wait(60)
                 continue
 
@@ -40,28 +97,23 @@ def session_keepalive_worker() -> None:
             wait(interval_h * 3600)
 
             cfg = load_app_config_validated()
-            if not _session_keepalive_enabled(cfg):
+            if not _any_keepalive_enabled(cfg):
                 continue
             while not _session_keepalive_is_safe():
                 log("keepalive: 流水线或结账正在进行，延后会话保活", "debug", category="keepalive")
                 wait(60)
                 cfg = load_app_config_validated()
-                if not _session_keepalive_enabled(cfg):
+                if not _any_keepalive_enabled(cfg):
                     break
-            if not _session_keepalive_enabled(cfg):
+            if not _any_keepalive_enabled(cfg):
                 continue
 
             # Re-check immediately before launching the browser to close the
             # race between the wait loop and a newly started pipeline.
             if not _session_keepalive_is_safe():
                 continue
-            log("keepalive: 开始本轮 Buff 后台会话保活...", "info", category="keepalive")
-            buff_ok, _buff_status, buff_msg = try_buff_auto_relogin()
-            if not buff_ok:
-                log(f"keepalive: Buff 保活未完成: {buff_msg}", "warn", category="keepalive")
-            else:
-                log(f"keepalive: Buff 保活成功: {buff_msg}", "info", category="keepalive")
-            log("keepalive: 本轮 Buff 后台会话保活已完成", "info", category="keepalive")
+            _keepalive_sessions(cfg)
+            log("keepalive: 本轮后台会话保活已完成", "info", category="keepalive")
         except WorkerStopped:
             raise
         except Exception as e:

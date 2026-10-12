@@ -12,9 +12,6 @@ from app.runtime.state import (
 )
 from app.configuration.repository import get_steam_credentials, load_app_config_validated
 from app.steam_market.inventory import scan_cs2_inventory
-from app.background.alerts import (
-    _worker_alert,
-)
 
 
 @stoppable_worker
@@ -130,5 +127,4 @@ def listing_check_worker() -> None:
             raise
         except Exception as e:
             log(f"listing_check_worker 异常 {type(e).__name__}: {e}", "error", category="steam")
-            _worker_alert("listing_check_worker", e)
             wait(60)

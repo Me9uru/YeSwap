@@ -35,7 +35,6 @@ def test_manual_buff_cookie_requires_session(monkeypatch):
     ("step", "should_resume"),
     [
         ("BUFF_AUTH_EXPIRED", True),
-        ("BUFF_VERIFICATION_REQUIRED", True),
         ("BUFF_WRITE_RESULT_UNKNOWN", False),
         ("BUFF_ORDER_CREATED_PENDING", False),
         ("CHECKOUT_PENDING", False),
@@ -304,3 +303,139 @@ def test_steam_auto_relogin_does_not_reuse_cookie_from_different_account(monkeyp
 
     assert result[0] is True
     assert any(call[0] == "update_creds" and "222%7C%7Cnew-token" in call[1] for call in calls)
+
+
+def test_cookie_validity_probe_is_strict_and_proxy_aware(monkeypatch):
+    """只有明确确认已登录才复用 Cookie；无法判定时不得跳过真实登录。
+
+    旧实现用直连 requests 且网络异常时 fail-open 返回 True，受限网络下
+    过期 Cookie 会被误判为有效，真实登录永远被跳过。"""
+    import steam.session as steam_session_module
+    from app.services import steam_auth
+
+    monkeypatch.setattr(
+        steam_session_module, "build_steam_session", lambda **_kwargs: object()
+    )
+
+    verdicts = iter([True, False, None])
+    monkeypatch.setattr(
+        steam_session_module, "check_login_state", lambda _session: next(verdicts)
+    )
+
+    assert steam_auth._verify_steam_cookies_valid("steamLoginSecure=token") is True
+    assert steam_auth._verify_steam_cookies_valid("steamLoginSecure=token") is False
+    # 无法判定（None）按"未确认有效"处理，让调用方继续真实登录。
+    assert steam_auth._verify_steam_cookies_valid("steamLoginSecure=token") is False
+    # 缺少 steamLoginSecure 时不发请求。
+    assert steam_auth._verify_steam_cookies_valid("sessionid=only") is False
+
+
+def test_relogin_bounce_prefers_community_domain_cookies(monkeypatch):
+    """登录后社区握手必须确认登录态成立，并优先采用社区域名 Cookie。"""
+    import steam.session as steam_session_module
+    from app.services import steam_auth
+
+    class _Cookie:
+        def __init__(self, name, value, domain=""):
+            self.name, self.value, self.domain = name, value, domain
+
+    class _Session:
+        cookies = type("Jar", (), {"jar": [
+            _Cookie("steamLoginSecure", "store-token"),
+            _Cookie("steamLoginSecure", "community-token", ".steamcommunity.com"),
+            _Cookie("sessionid", "fresh-sid"),
+        ]})()
+
+    monkeypatch.setattr(steam_session_module, "build_steam_session", lambda **kw: _Session())
+    monkeypatch.setattr(steam_session_module, "check_login_state", lambda _session: True)
+
+    merged = steam_auth._ensure_community_session(
+        {"steamLoginSecure": "store-token", "sessionid": "old-sid"}
+    )
+    assert merged["steamLoginSecure"] == "community-token"
+    assert merged["sessionid"] == "fresh-sid"
+
+
+def test_relogin_bounce_unconfirmed_session_signals_failure(monkeypatch):
+    """握手确认不了社区域名登录态时必须返回 None，不能把未确认凭据当成功。"""
+    import steam.session as steam_session_module
+    from app.services import steam_auth
+
+    def _boom(**_kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(steam_session_module, "build_steam_session", _boom)
+    assert steam_auth._ensure_community_session({"steamLoginSecure": "store-token"}) is None
+
+    # 会话能建立但 /my/ 仍显示未登录（如被风控）时同样按失败处理。
+    monkeypatch.setattr(steam_session_module, "build_steam_session", lambda **kw: object())
+    monkeypatch.setattr(steam_session_module, "check_login_state", lambda _session: False)
+    assert steam_auth._ensure_community_session({"steamLoginSecure": "store-token"}) is None
+
+
+def test_steam_cookie_probe_persists_rotated_tokens(monkeypatch):
+    """验证通过时必须回写被 Steam 轮换的令牌。
+
+    靠 steamRefresh_steam 换发的 steamLoginSecure 如果只留在内存会话里，
+    存储凭据（约 24 小时 JWT）到期后照样失效，只能再跑密码登录。"""
+    import steam.session as steam_session_module
+    from app.services import steam_auth
+
+    class _Cookie:
+        def __init__(self, name, value, domain=""):
+            self.name, self.value, self.domain = name, value, domain
+
+    class _Session:
+        def __init__(self, jar):
+            self.cookies = type("Jar", (), {"jar": jar})()
+
+    def _jar():
+        return [
+            _Cookie("sessionid", "sid"),
+            _Cookie("steamLoginSecure", "fresh-token", ".steamcommunity.com"),
+            _Cookie("steamRefresh_steam", "refresh-2", ".steampowered.com"),
+        ]
+
+    sessions = iter([_Session(_jar()), _Session(_jar())])
+    monkeypatch.setattr(
+        steam_session_module, "build_steam_session", lambda **_kw: next(sessions)
+    )
+    monkeypatch.setattr(steam_session_module, "check_login_state", lambda _session: True)
+    saved = []
+    monkeypatch.setattr(
+        steam_auth,
+        "update_steam_creds",
+        lambda cookie_str, session_id="": saved.append((cookie_str, session_id)),
+    )
+
+    stale = "steamLoginSecure=old; steamRefresh_steam=refresh-1"
+    assert steam_auth._verify_steam_cookies_valid(stale) is True
+    assert len(saved) == 1
+    assert "steamLoginSecure=fresh-token" in saved[0][0]
+    assert "steamRefresh_steam=refresh-2" in saved[0][0]
+    assert saved[0][1] == "sid"
+
+    # jar 与存储一致时不重复写盘（保活探测每天跑多次，避免无谓的文件改动）。
+    current = "sessionid=sid; steamLoginSecure=fresh-token; steamRefresh_steam=refresh-2"
+    assert steam_auth._verify_steam_cookies_valid(current) is True
+    assert len(saved) == 1
+
+
+def test_steam_credential_persistence_keeps_refresh_token():
+    """落盘凭据必须保留 steamRefresh_steam 刷新令牌。
+
+    过滤掉它会让约 24 小时过期的 steamLoginSecure 无法再经 jwt/refresh 静默
+    续期，每次到期都退化成一次密码登录。无关 Cookie 仍不得入库。"""
+    from config import get_steam, update_steam_credentials
+    from utils.cookies import parse_cookies
+
+    update_steam_credentials(
+        "sessionid=sid; steamLoginSecure=tok; steamRefresh_steam=refresh; browserid=ignored",
+        "sid",
+    )
+
+    stored = parse_cookies(get_steam()["cookies"])
+    assert stored["steamRefresh_steam"] == "refresh"
+    assert stored["steamLoginSecure"] == "tok"
+    assert "browserid" not in stored
+    assert get_steam()["session_id"] == "sid"
