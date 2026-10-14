@@ -6,9 +6,10 @@ import requests
 from requests.cookies import RequestsCookieJar, create_cookie
 
 from buff.buyer import (
+    API_BILL_ORDER_BATCH_INFO,
     API_BUY,
-    API_BUY_ORDER_CHECK_STATE,
     API_HISTORY,
+    API_MANUAL_PLUS_BUYER_SEND_OFFER,
     API_PAGE_PAY,
     API_STEAM_TRADE,
     API_WX_PAY_QRCODE,
@@ -752,9 +753,24 @@ def test_every_issued_abnormal_write_is_unknown_and_keeps_relevant_circuit(
         #   * an auth/circuit failure on the read side stops retrying at once
         #     (401 and 403 both raise a `BuffRequestBlocked` subclass, so the
         #     risk spelling adds no branch)
+        #   * 免密（自动扣款）订单的实测签名：code=OK、data 只有 auto_pay /
+        #     buff_pay_channel 渠道配置；不会产出支付链接，只查询一次即
+        #     短路转入免密付款状态确认
         (requests.Timeout("payment lookup timed out"), 4),
         (FakeResponse({"code": "OK", "data": {"url": {"bad": "type"}}}), 4),
         (FakeResponse({"code": "LOGIN_REQUIRED"}, status_code=401), 1),
+        (
+            FakeResponse(
+                {
+                    "code": "OK",
+                    "data": {
+                        "auto_pay": {"channel": "epay"},
+                        "buff_pay_channel": "alipay",
+                    },
+                }
+            ),
+            1,
+        ),
     ],
 )
 def test_order_created_payment_lookup_failure_returns_created_pending(
@@ -881,6 +897,24 @@ def test_wechat_payment_lookup_auth_failure_is_created_pending(monkeypatch):
     ]
 
 
+def test_lock_business_rejection_is_known_not_created():
+    # BUFF 对写请求的明确业务拒绝（非 OK 且含错误原因）不可能是「已创建」，
+    # 必须带 created=False 以便调用方跳过本件继续，而不是按未知结果停机。
+    session = FakeSession(
+        FakeResponse({"code": "FAIL", "error": "该饰品暂不支持此支付方式"})
+    )
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    result = buyer.lock_and_get_pay_url("csgo", 1, "sell-order", "10.00")
+
+    assert result["success"] is False
+    assert result["created"] is False
+    assert result["msg"] == "该饰品暂不支持此支付方式"
+    assert len(session.calls) == 1
+
+
 def test_created_order_with_valid_payment_url_keeps_success_contract():
     session = FakeSession(
         FakeResponse({"code": "OK", "data": {"id": "paid-order"}}),
@@ -901,53 +935,158 @@ def test_created_order_with_valid_payment_url_keeps_success_contract():
 
 
 @pytest.mark.parametrize(
-    ("state", "pay_expire_timeout", "expected"),
+    ("item", "expected"),
     [
-        # 网页客户端的收银台状态机：6=待付款、7=付款失败，其余数值为已支付终态
-        pytest.param(2, 120, BUY_ORDER_PAY_PAID, id="paid_state"),
-        pytest.param(101, 120, BUY_ORDER_PAY_PAID, id="other_terminal_state"),
-        pytest.param(6, 120, BUY_ORDER_PAY_PENDING, id="awaiting_payment"),
-        pytest.param("6", 0, BUY_ORDER_PAY_PENDING, id="string_state"),
-        pytest.param(6, -1, BUY_ORDER_PAY_FAILED, id="payment_window_expired"),
-        pytest.param(7, 120, BUY_ORDER_PAY_FAILED, id="payment_failed"),
-        pytest.param(None, 120, BUY_ORDER_PAY_UNKNOWN, id="missing_state"),
-        pytest.param(True, 120, BUY_ORDER_PAY_UNKNOWN, id="boolean_state"),
+        # 直接付款证据：buyer_pay_time 在扣款完成后立即写入
+        pytest.param(
+            {
+                "mode": 2,
+                "state": "PAYING",
+                "progress": 102,
+                "pay_expire_time": "2026-10-13 16:06:56",
+                "pay_expire_timeout": 200,
+                "buyer_pay_time": 1791878509,
+            },
+            BUY_ORDER_PAY_PAID,
+            id="buyer_pay_time_written",
+        ),
+        # 状态证据：真实免密订单观测到 mode=5/state=DELIVERING/progress=202
+        pytest.param(
+            {"mode": 5, "state": "DELIVERING", "progress": 202},
+            BUY_ORDER_PAY_PAID,
+            id="delivering_after_passwordless_deduction",
+        ),
+        pytest.param(
+            {"mode": 2, "state": "TO_DELIVER", "progress": 302},
+            BUY_ORDER_PAY_PAID,
+            id="waiting_delivery",
+        ),
+        pytest.param(
+            {"mode": 2, "state": "SUCCESS", "progress": 101},
+            BUY_ORDER_PAY_PAID,
+            id="trade_success",
+        ),
+        pytest.param(
+            {"mode": 5, "state": "PAYING", "progress": 305},
+            BUY_ORDER_PAY_PAID,
+            id="mode5_progress_terminal",
+        ),
+        pytest.param(
+            {
+                "mode": 2,
+                "state": "PAYING",
+                "progress": 102,
+                "pay_expire_time": "2026-10-13 16:06:56",
+                "pay_expire_timeout": 200,
+            },
+            BUY_ORDER_PAY_PENDING,
+            id="awaiting_payment",
+        ),
+        pytest.param(
+            {"mode": 2, "state": "PAYING", "progress": 102, "buyer_pay_time": "0"},
+            BUY_ORDER_PAY_PENDING,
+            id="string_zero_pay_time_is_not_payment",
+        ),
+        pytest.param(
+            {"mode": 2, "state": "FAIL", "progress": 104},
+            BUY_ORDER_PAY_FAILED,
+            id="payment_failed",
+        ),
+        pytest.param(
+            {
+                "mode": 2,
+                "state": "PAYING",
+                "progress": 102,
+                "pay_expire_time": "2026-10-13 16:06:56",
+                "pay_expire_timeout": -1,
+            },
+            BUY_ORDER_PAY_FAILED,
+            id="payment_window_expired",
+        ),
+        pytest.param({}, BUY_ORDER_PAY_UNKNOWN, id="empty_item"),
     ],
 )
-def test_buy_order_pay_state_probe_follows_cashier_state_machine(
-    state, pay_expire_timeout, expected
-):
+def test_bill_order_pay_state_probe_follows_client_state_machine(item, expected):
+    session = FakeSession(FakeResponse({"code": "OK", "data": {"items": [item]}}))
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    result = buyer.get_bill_order_pay_state("bill-1", "csgo")
+
+    assert result["status"] == expected
+    method, url, kwargs = session.calls[0]
+    assert (method, url) == ("GET", API_BILL_ORDER_BATCH_INFO)
+    assert kwargs["params"]["bill_orders"] == "bill-1"
+
+
+def test_buyer_send_offer_posts_encrypted_session_and_order_ids():
+    session = FakeSession(FakeResponse({"code": "OK", "data": {"num": 1}}))
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    result = buyer.buyer_send_offer("steamLoginSecure=x; sessionid=y", ["bill-1", "bill-1", ""])
+
+    assert result["success"] is True
+    method, url, kwargs = session.calls[0]
+    assert (method, url) == ("POST", API_MANUAL_PLUS_BUYER_SEND_OFFER)
+    assert kwargs["headers"]["X-Csrftoken"] == "c"
+    body = json.loads(kwargs["data"])
+    assert body["bill_orders"] == ["bill-1"]
+    assert isinstance(body["buyer_info"], str) and body["buyer_info"]
+
+
+def test_buyer_send_offer_reports_rejection_without_retrying():
     session = FakeSession(
-        FakeResponse(
-            {
-                "code": "OK",
-                "data": {"state": state, "pay_expire_timeout": pay_expire_timeout},
-            }
-        )
+        FakeResponse({"code": "Error", "error": "订单状态不允许发起报价"})
     )
     buyer = BuffBuyer(
         "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
     )
 
-    assert buyer.get_buy_order_pay_state("bill-1", "csgo") == expected
-    method, url, kwargs = session.calls[0]
-    assert (method, url) == ("GET", API_BUY_ORDER_CHECK_STATE)
-    assert kwargs["params"]["buy_order_id"] == "bill-1"
+    result = buyer.buyer_send_offer("steamLoginSecure=x", ["bill-1"])
+
+    assert result["success"] is False
+    assert "不允许" in result["error"]
+    assert len(session.calls) == 1
 
 
-def test_buy_order_pay_state_probe_is_unknown_for_unusable_responses():
+def test_buyer_send_offer_requires_session_and_order_ids():
+    session = FakeSession()
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    assert buyer.buyer_send_offer("   ", ["bill-1"])["success"] is False
+    assert buyer.buyer_send_offer("steamLoginSecure=x", [])["success"] is False
+    assert session.calls == []
+
+
+def test_buyer_send_offer_transport_failure_stays_write_unknown():
+    session = FakeSession(requests.ConnectionError("socket closed"))
+    buyer = BuffBuyer(
+        "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
+    )
+
+    with pytest.raises(BuffWriteResultUnknown):
+        buyer.buyer_send_offer("steamLoginSecure=x", ["bill-1"])
+
+
+def test_bill_order_pay_state_probe_is_unknown_for_unusable_responses():
     session = FakeSession(
         FakeResponse({"code": "SYSTEM_BUSY", "error": "系统繁忙"}),
         FakeResponse({"code": "OK", "data": "not-a-dict"}),
+        FakeResponse({"code": "OK", "data": {"items": []}}),
+        FakeResponse({"code": "OK", "data": {"items": [{"mode": 2}, {"mode": 2}]}}),
         requests.ConnectionError("socket closed"),
     )
     buyer = BuffBuyer(
         "session=s; csrf_token=c", session=session, request_policy=no_wait_policy()
     )
 
-    assert buyer.get_buy_order_pay_state("bill-1") == BUY_ORDER_PAY_UNKNOWN
-    assert buyer.get_buy_order_pay_state("bill-1") == BUY_ORDER_PAY_UNKNOWN
-    assert buyer.get_buy_order_pay_state("bill-1") == BUY_ORDER_PAY_UNKNOWN
+    for _ in range(5):
+        assert buyer.get_bill_order_pay_state("bill-1")["status"] == BUY_ORDER_PAY_UNKNOWN
 
 
 def test_login_redirect_is_auth_expired_and_verification_redirect_is_fused():

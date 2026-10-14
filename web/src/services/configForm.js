@@ -46,6 +46,16 @@ export const settingsGroups = [
           ["alipay", "支付宝（兼容配置）"],
         ],
       ],
+      // 比例制优先：容忍 = 参考价 × 比例；为 0 时回退绝对值 buff.price_tolerance（元）
+      [
+        "buff",
+        "price_tolerance_ratio",
+        "买入价格容忍比例（0.02=2%）",
+        "number",
+        0,
+        1,
+        0.005,
+      ],
       ["pipeline", "start_time_limit_enabled", "启用运行时段限制", "boolean"],
       ["pipeline", "start_time_hour", "开始时间（小时）", "integer", 0, 23],
       ["pipeline", "end_time_hour", "结束时间（小时）", "integer", 0, 23],

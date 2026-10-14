@@ -19,10 +19,18 @@ DEFAULTS = {
         "pay_method": "alipay",
         "game": "csgo",
         "price_tolerance": 0.5,
+        # 买入价格容忍比例（比例制优先）：容忍 = 参考价 × 比例，让大额与
+        # 小额获得一致的风险尺度；为 0 时回退到绝对金额 price_tolerance。
+        # 必须是浮点默认值，否则校验器会按 int 强转把小数比例截断为 0。
+        "price_tolerance_ratio": 0.0,
         # Optional ancillary POSTs add traffic and can themselves have an
         # unknown result. Keep seller reminders manual unless explicitly opted
         # in by an advanced user.
         "auto_ask_seller_to_send": False,
+        # 手动+（mode 5/8）订单：把加密后的 Steam Cookie 提交给 BUFF，由
+        # BUFF 服务端代买家发起交易报价。这是一次真实的 Steam 报价写操作，
+        # 默认关闭，需显式开启；失败时仍可回退到提醒卖家/APP 手动发起。
+        "auto_send_buyer_offer": False,
     },
     "stability": {
         "days": 30,

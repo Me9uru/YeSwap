@@ -450,3 +450,111 @@ def test_unknown_accept_result_is_reconciled_from_inventory(monkeypatch):
     assert received == 1
     assert purchases[0]["assetid"] == "receiver-new-asset"
     assert purchases[0]["pending_receipt"] is False
+
+
+def test_delivered_order_reconciles_pending_receipt_from_inventory():
+    purchases = [
+        {
+            "_db_id": 1,
+            "name": ITEM_NAME,
+            "at": 1.0,
+            "pending_receipt": True,
+            "buff_order_id": "order-ok",
+        },
+        {
+            "_db_id": 2,
+            "name": ITEM_NAME,
+            "at": 2.0,
+            "pending_receipt": True,
+            "buff_order_id": "order-delivering",
+        },
+        {
+            "_db_id": 3,
+            "name": "Manual Item",
+            "at": 3.0,
+            "pending_receipt": True,
+        },
+        {
+            "_db_id": 4,
+            "name": "Ghost Item",
+            "at": 4.0,
+            "pending_receipt": True,
+            "buff_order_id": "order-ok-no-stock",
+        },
+    ]
+    queried = []
+    states = {
+        "order-ok": {"status": "paid", "state": "SUCCESS"},
+        "order-delivering": {"status": "paid", "state": "DELIVERING"},
+        # 订单已交付但库存尚未出现该物品（Steam 最终一致窗口）
+        "order-ok-no-stock": {"status": "paid", "state": "SUCCESS"},
+    }
+
+    class Client:
+        def get_bill_order_pay_state(self, order_id, game="csgo"):
+            queried.append(order_id)
+            return states[order_id]
+
+    inventory = [
+        {"assetid": "asset-b", "market_hash_name": ITEM_NAME},
+        {"assetid": "asset-a", "market_hash_name": ITEM_NAME},
+        {"assetid": "asset-x", "market_hash_name": "Manual Item"},
+    ]
+
+    def update_purchase_by_id(db_id, data):
+        row = next(r for r in purchases if r["_db_id"] == db_id)
+        row.update(data)
+        return True
+
+    reconciled = receive_flow.reconcile_delivered_purchases(
+        get_purchases=lambda: [dict(r) for r in purchases],
+        get_buff_client=lambda: Client(),
+        scan_inventory=lambda: (True, list(inventory), ""),
+        update_purchase_by_id=update_purchase_by_id,
+    )
+
+    assert reconciled == 1
+    # 只查询「待收货 + 有订单号」的记录；补录记录不产生 BUFF 查询
+    assert queried == ["order-ok", "order-delivering", "order-ok-no-stock"]
+    # 同名的多个库存物品按 assetid 确定性分配，只绑定一个
+    assert purchases[0]["assetid"] == "asset-a"
+    assert purchases[0]["pending_receipt"] is False
+    # 未交付（DELIVERING）与库存未出现的记录保持待收货
+    assert purchases[1].get("assetid") is None
+    assert purchases[1]["pending_receipt"] is True
+    assert purchases[3].get("assetid") is None
+    assert purchases[3]["pending_receipt"] is True
+    # 无订单号的补录记录不受影响
+    assert purchases[2].get("assetid") is None
+    assert purchases[2]["pending_receipt"] is True
+
+
+def test_reconcile_keeps_pending_when_inventory_scan_fails():
+    purchases = [
+        {
+            "_db_id": 1,
+            "name": ITEM_NAME,
+            "at": 1.0,
+            "pending_receipt": True,
+            "buff_order_id": "order-ok",
+        },
+    ]
+
+    class Client:
+        def get_bill_order_pay_state(self, order_id, game="csgo"):
+            return {"status": "paid", "state": "SUCCESS"}
+
+    def update_purchase_by_id(db_id, data):
+        purchases[0].update(data)
+        return True
+
+    reconciled = receive_flow.reconcile_delivered_purchases(
+        get_purchases=lambda: [dict(r) for r in purchases],
+        get_buff_client=lambda: Client(),
+        scan_inventory=lambda: (False, [], "inventory unavailable"),
+        update_purchase_by_id=update_purchase_by_id,
+    )
+
+    assert reconciled == 0
+    assert purchases[0]["pending_receipt"] is True
+    assert not purchases[0].get("assetid")

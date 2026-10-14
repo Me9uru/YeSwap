@@ -100,6 +100,30 @@ def _fetch_steam_sell_data(
         return (None, reason) if return_error else None
 
 
+def _effective_price_tolerance(plan_price, buff_cfg: dict) -> float:
+    """买入价格容忍（元）。
+
+    优先按比例制计算：``buff.price_tolerance_ratio``（如 0.02 表示允许相对
+    参考价上浮 2%），让大额与小额获得一致的风险尺度；未配置比例（<=0）或
+    参考价无效时回退到绝对值 ``buff.price_tolerance``。
+    """
+    try:
+        ratio = float(buff_cfg.get("price_tolerance_ratio", 0) or 0)
+    except (TypeError, ValueError):
+        ratio = 0.0
+    if ratio > 0:
+        try:
+            base = float(plan_price)
+        except (TypeError, ValueError):
+            base = 0.0
+        if base > 0:
+            return base * ratio
+    try:
+        return float(buff_cfg.get("price_tolerance", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def _check_buff_price(
     item,
     gid,
@@ -113,7 +137,7 @@ def _check_buff_price(
     # 注意：BuffAuthExpired 要直接往上抛，不能在这里吃掉
     buff_cfg = config.get("buff", {})
     game_buff = buff_cfg.get("game", "csgo")
-    tolerance = float(buff_cfg.get("price_tolerance", 0.5))
+    tolerance = _effective_price_tolerance(plan_price, buff_cfg)
     orders = buff_client.get_sell_orders(gid, game_buff)
     if not orders:
         if log_fn:

@@ -193,6 +193,74 @@ def _match_purchase_for_item(
     if len(name_candidates) != 1:
         return None
     return name_candidates[0]
+def reconcile_delivered_purchases(
+    get_purchases: Callable[[], List[dict]],
+    get_buff_client: Callable[[], Any],
+    scan_inventory: Optional[Callable[[], Tuple[bool, List[dict], str]]] = None,
+    update_purchase_by_id: Optional[Callable[[int, dict], bool]] = None,
+) -> int:
+    """按 BUFF 订单交付状态对账「待收货」记录。
+
+    手动+（mode 5/8）订单由买家发起报价、卖家接受后交付，全程不会出现
+    「待买家接受」的报价，也不会进入 BUFF 待收货列表——``try_receive_once``
+    的接受路径永远看不到它们。这里对有 ``buff_order_id`` 的待收货记录查询
+    ``bill_order/batch/info``，仅在订单状态为 SUCCESS（已交付）时，按饰品名
+    从 Steam 库存中选一个未被占用的 assetid 落库（assetid +
+    pending_receipt=False）。状态未到 SUCCESS、库存不可用或没有同名未占用
+    物品时保持待收货，下轮重试。只读查询 + 本地写入，不发起任何 BUFF 写请求。
+    """
+
+    if not update_purchase_by_id:
+        return 0
+    purchases = get_purchases()
+    pending_records: List[dict] = [
+        p for p in purchases
+        if p.get("pending_receipt") and not p.get("assetid")
+        and p.get("buff_order_id") and p.get("_db_id")
+    ]
+    if not pending_records:
+        return 0
+    buff_client = get_buff_client()
+    delivered: List[dict] = []
+    for record in sorted(
+        pending_records, key=lambda p: (p.get("at") or 0, p.get("_db_id") or 0)
+    ):
+        state = buff_client.get_bill_order_pay_state(str(record["buff_order_id"]))
+        if (
+            isinstance(state, dict)
+            and str(state.get("state") or "").strip().upper() == "SUCCESS"
+        ):
+            delivered.append(record)
+    if not delivered or not scan_inventory:
+        return 0
+    ok, inv_items, _err = scan_inventory()
+    if not ok:
+        return 0
+    used_assetids = {str(p.get("assetid")) for p in purchases if p.get("assetid")}
+    candidates = sorted(
+        (it for it in inv_items or [] if it.get("assetid")),
+        key=lambda it: str(it.get("assetid") or ""),
+    )
+    reconciled = 0
+    for record in delivered:
+        name = (record.get("name") or "").strip()
+        if not name:
+            continue
+        for inv_item in candidates:
+            assetid = str(inv_item.get("assetid") or "")
+            if not assetid or assetid in used_assetids:
+                continue
+            if (
+                (inv_item.get("market_hash_name") or "").strip() == name
+                or (inv_item.get("name") or "").strip() == name
+            ):
+                if update_purchase_by_id(
+                    record["_db_id"], {"assetid": assetid, "pending_receipt": False}
+                ):
+                    used_assetids.add(assetid)
+                    reconciled += 1
+                break
+    return reconciled
 def try_receive_once(
     get_purchases: Callable[[], List[dict]],
     update_purchase: Callable[[int, dict], bool],

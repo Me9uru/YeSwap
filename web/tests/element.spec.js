@@ -166,7 +166,6 @@ describe("Element Plus 页面", () => {
     for (const name of [
       "Steam 库存",
       "持有饰品",
-      "购入记录",
       "售出记录",
       "数据分析",
       "策略中心",
@@ -353,6 +352,83 @@ describe("Element Plus 页面", () => {
     expect(
       calls.find((c) => c.path === "/transaction" && c.method === "PUT").body,
     ).toEqual({ type: "purchase", idx: 4, db_id: 42, sale_proceeds: 15.25 });
+  });
+
+  it("挂单异常在状态列显示待修复，正常持仓显示持有", async () => {
+    data["/transactions"].transactions = [
+      {
+        type: "purchase",
+        idx: 0,
+        db_id: 1,
+        name: "异常挂单",
+        price: 10,
+        at: 2,
+        listing: false,
+        listing_status: "error",
+      },
+      { type: "purchase", idx: 1, db_id: 2, name: "正常持仓", price: 10, at: 1 },
+    ];
+    await render(Transactions, { mode: "purchases" });
+    const tags = wrapper.findAll(".el-tag");
+    const broken = tags.find((tag) => tag.text() === "待修复");
+    expect(broken).toBeTruthy();
+    expect(broken.classes()).toContain("el-tag--danger");
+    expect(tags.some((tag) => tag.text() === "持有")).toBe(true);
+  });
+
+  it("含已售出开关并入历史视图，批量售出只提交未售出记录", async () => {
+    data["/transactions"].transactions = [
+      { type: "purchase", idx: 0, db_id: 41, name: "在持饰品", price: 10, at: 2 },
+      {
+        type: "purchase",
+        idx: 1,
+        db_id: 42,
+        name: "已售饰品",
+        price: 10,
+        at: 1,
+        sale_price: 15,
+        sold_at: 5,
+      },
+    ];
+    vi.spyOn(ElMessageBox, "confirm").mockResolvedValue("confirm");
+    await render(Transactions, { mode: "purchases" });
+    const body = () => wrapper.find(".el-table__body").text();
+    expect(body()).toContain("在持饰品");
+    expect(body()).not.toContain("已售饰品");
+    wrapper
+      .findComponent({ name: "ElSwitch" })
+      .vm.$emit("update:modelValue", true);
+    await nextTick();
+    expect(body()).toContain("已售饰品");
+    expect(wrapper.text()).toContain("售出价（税前 CNY）");
+    expect(
+      wrapper.findAll("button").filter((b) => b.text() === "记录售出"),
+    ).toHaveLength(1);
+    wrapper
+      .findComponent({ name: "ElTable" })
+      .vm.$emit("selection-change", data["/transactions"].transactions);
+    await nextTick();
+    await button("批量记录售出").trigger("click");
+    await flushPromises();
+    const input = document.querySelector(".el-dialog input");
+    input.value = "15.25";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    await nextTick();
+    [...document.querySelectorAll(".el-dialog button")]
+      .find((b) => b.textContent.trim() === "保存记录")
+      .click();
+    await flushPromises();
+    const puts = calls.filter(
+      (c) => c.path === "/transaction" && c.method === "PUT",
+    );
+    expect(puts).toHaveLength(1);
+    expect(puts[0].body).toEqual({
+      type: "purchase",
+      idx: 0,
+      db_id: 41,
+      sale_proceeds: 15.25,
+    });
   });
 });
 

@@ -47,6 +47,15 @@ def test_validate_iflow_min_price_zero_is_preserved():
     assert result["iflow"]["min_price"] == 0
 
 
+def test_validate_float_ratio_is_not_truncated_by_int_default():
+    # schema 默认值必须是浮点：若默认写成 int，校验器会按 int 强转，
+    # 把小数的价格容忍比例（如 0.02）截断成 0，比例制静默失效。
+    result = validate_and_fill(
+        {"buff": {"price_tolerance_ratio": 0.02}}, DEFAULTS
+    )
+    assert result["buff"]["price_tolerance_ratio"] == pytest.approx(0.02)
+
+
 # ── _validate_ranges() 范围校验 ───────────────────────────────────────────
 
 @pytest.mark.parametrize(

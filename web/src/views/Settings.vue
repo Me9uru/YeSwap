@@ -191,7 +191,7 @@ const vLoading = ElLoading.directive;
                 :min="field[4]"
                 :max="field[5]"
                 :precision="field[3] === 'integer' ? 0 : undefined"
-                :step="field[3] === 'integer' ? 1 : 0.5"
+                :step="field[6] ?? (field[3] === 'integer' ? 1 : 0.5)"
               />
               <el-select
                 v-else-if="field[3] === 'select'"

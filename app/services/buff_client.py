@@ -190,9 +190,14 @@ class BuffClient:
     def get_steam_trades(self) -> Optional[list]:
         return self._run(lambda buyer: buyer.get_steam_trades())
 
-    def get_buy_order_pay_state(self, order_id: str, game: str = "csgo") -> str:
+    def get_bill_order_pay_state(self, order_id: str, game: str = "csgo") -> dict:
         return self._run(
-            lambda buyer: buyer.get_buy_order_pay_state(order_id, game)
+            lambda buyer: buyer.get_bill_order_pay_state(order_id, game)
+        )
+
+    def buyer_send_offer(self, steam_cookies: str, bill_orders: List[str]) -> Dict[str, Any]:
+        return self._run(
+            lambda buyer: buyer.buyer_send_offer(steam_cookies, bill_orders)
         )
 
     def get_goods_steam_price_cny(

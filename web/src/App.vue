@@ -78,7 +78,6 @@ const sections = [
         Transactions,
         "跟踪持仓、上架与实际到账",
       ],
-      ["history", "购入记录", Document, Transactions, "管理全部购入操作记录"],
       ["sales", "售出记录", TrendCharts, Transactions, "查看已完成的售出记录"],
       [
         "analytics",
@@ -266,7 +265,7 @@ onUnmounted(() => {
             :key="active"
             ref="page"
             v-bind="
-              ['purchases', 'history', 'sales'].includes(active)
+              ['purchases', 'sales'].includes(active)
                 ? { mode: active }
                 : {}
             "

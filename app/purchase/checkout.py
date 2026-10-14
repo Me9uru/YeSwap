@@ -24,6 +24,7 @@ from app.purchase.market import (
     _buff_orders_cache_is_fresh,
     _cache_buff_sell_orders,
     _compute_sell_pressure_from_orders,
+    _effective_price_tolerance,
     _fetch_steam_sell_data,
     _parse_threshold,
 )
@@ -52,9 +53,9 @@ def lock_and_confirm_payment(
 ) -> Optional[float]:
     buff_cfg = config.get("buff", {})
     game_buff = buff_cfg.get("game", "csgo")
-    tolerance = float(buff_cfg.get("price_tolerance", 0.5))
     goods_id = item["goods_id"]
     plan_price = item.get("_buff_lowest_price") or item.get("min_price")
+    tolerance = _effective_price_tolerance(plan_price, buff_cfg)
     try:
         orders_cache_ttl = float(
             config.get("pipeline", {}).get(

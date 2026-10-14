@@ -8,7 +8,7 @@ from app.services.buff_checkout_guard import (
     BuffCheckoutGuardMismatch,
     acknowledge_checkout,
 )
-from app.runtime.state import request_stop, set_status, log
+from app.runtime.state import get_status, request_stop, set_status, log
 router = APIRouter()
 class ConfigBody(BaseModel):
     config: dict
@@ -71,6 +71,18 @@ def api_buff_checkout_guard():
     }
 
 
+# 人工核对解决的是「写结果未知 / 订单已创建未付款」这类待对账歧义；核对成功
+# 后必须同步复位对应的停机 step，否则 background/safety 的后台 BUFF 读取门禁
+# （收货、库存等）会继续被已核对过的 step 永久挡住。冷却与异常崩溃不属于可随
+# 核对解除的范畴，保持原样。
+_RECONCILE_RELEASABLE_STEPS = frozenset(
+    {
+        "BUFF_WRITE_RESULT_UNKNOWN",
+        "BUFF_ORDER_CREATED_PENDING",
+    }
+)
+
+
 @router.post("/api/pipeline/buff_checkout_guard/reconcile")
 def api_reconcile_buff_checkout(body: CheckoutReconcileBody):
     intent_id = body.intent_id.strip()
@@ -91,8 +103,12 @@ def api_reconcile_buff_checkout(body: CheckoutReconcileBody):
         acknowledge_checkout(intent_id, reason)
     except BuffCheckoutGuardMismatch as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    released = (get_status() or {}).get("step") in _RECONCILE_RELEASABLE_STEPS
+    if released:
+        set_status("stopped", "已人工对账，等待启动")
     log(
-        f"BUFF checkout 已人工对账并解除门禁 intent_id={intent_id} outcome={body.outcome}",
+        f"BUFF checkout 已人工对账并解除门禁 intent_id={intent_id} "
+        f"outcome={body.outcome}" + ("；运行状态已复位" if released else ""),
         level="warn",
         category="buff",
     )

@@ -2,6 +2,7 @@ from app.purchase import checkout as purchase_checkout
 from app.purchase import market as purchase_market
 from app.purchase import payment as purchase_payment
 from app.purchase import settlement as purchase_settlement
+from app.purchase.market import _effective_price_tolerance
 import time
 
 import pytest
@@ -772,8 +773,8 @@ def test_single_created_without_pay_url_keeps_order_id_and_never_auto_resumes(
                 "msg": "verification required while reading payment link",
             }
 
-        def get_buy_order_pay_state(self, *_args):
-            return BUY_ORDER_PAY_PENDING
+        def get_bill_order_pay_state(self, *_args):
+            return {"status": BUY_ORDER_PAY_PENDING, "mode": 2, "state": "PAYING", "progress": 102}
 
     monkeypatch.setattr(
         purchase_payment, "PASSWORDLESS_PAYMENT_POLL_DELAYS", (0.0,)
@@ -803,7 +804,10 @@ def test_single_passwordless_payment_confirms_and_records_purchase(monkeypatch):
         _pay_method = "alipay"
 
         def __init__(self):
-            self.states = [BUY_ORDER_PAY_PENDING, BUY_ORDER_PAY_PAID]
+            self.states = [
+                {"status": BUY_ORDER_PAY_PENDING, "mode": 2, "state": "PAYING", "progress": 102},
+                {"status": BUY_ORDER_PAY_PAID, "mode": 2, "state": "TO_DELIVER", "progress": 302},
+            ]
             self.shipping_calls = 0
 
         def lock_and_get_pay_url(self, *_args):
@@ -815,7 +819,7 @@ def test_single_passwordless_payment_confirms_and_records_purchase(monkeypatch):
                 "pay_type": "alipay",
             }
 
-        def get_buy_order_pay_state(self, *_args):
+        def get_bill_order_pay_state(self, *_args):
             return self.states.pop(0)
 
         def ask_seller_to_send(self, *_args):
@@ -865,8 +869,8 @@ def test_single_passwordless_payment_failure_resolves_without_recording():
                 "order_id": "bill-failed-pay",
             }
 
-        def get_buy_order_pay_state(self, *_args):
-            return BUY_ORDER_PAY_FAILED
+        def get_bill_order_pay_state(self, *_args):
+            return {"status": BUY_ORDER_PAY_FAILED, "mode": 2, "state": "FAIL", "progress": 104}
 
     kwargs, _pending, purchases = _checkout_args()
 
@@ -896,7 +900,7 @@ def test_single_passwordless_confirmation_error_keeps_reconciliation_gate():
                 "order_id": "bill-unknown-pay",
             }
 
-        def get_buy_order_pay_state(self, *_args):
+        def get_bill_order_pay_state(self, *_args):
             raise RuntimeError("transport exploded")
 
     kwargs, _pending, purchases = _checkout_args()
@@ -928,7 +932,7 @@ def test_single_passwordless_confirmation_stops_polling_on_stop_request():
                 "order_id": "bill-stopped",
             }
 
-        def get_buy_order_pay_state(self, *_args):
+        def get_bill_order_pay_state(self, *_args):
             raise AssertionError("stop request must prevent further state probes")
 
     kwargs, _pending, _purchases = _checkout_args()
@@ -943,6 +947,225 @@ def test_single_passwordless_confirmation_stops_polling_on_stop_request():
         )
 
     assert exc_info.value.order_id == "bill-stopped"
+
+
+def _manual_plus_client(**overrides):
+    """手动+（mode 5）订单的假客户端：已付款、尚未发起报价。"""
+
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def __init__(self):
+            self.offer_calls = []
+            self.seller_prompts = 0
+            self.handlers = {
+                "buyer_send_offer": None,
+                **overrides,
+            }
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": True,
+                "order_id": "bill-plus",
+                "pay_url": "https://pay.invalid/plus",
+                "pay_type": "alipay",
+            }
+
+        def get_bill_order_pay_state(self, *_args):
+            return {
+                "status": BUY_ORDER_PAY_PAID,
+                "mode": 5,
+                "state": "PAYING",
+                "progress": 202,
+                "has_sent_offer": False,
+            }
+
+        def buyer_send_offer(self, cookies, bill_orders):
+            handler = self.handlers["buyer_send_offer"]
+            if handler is not None:
+                return handler(cookies, bill_orders)
+            self.offer_calls.append((cookies, bill_orders))
+            return {"success": True, "data": {}, "error": ""}
+
+        def ask_seller_to_send(self, *_args):
+            self.seller_prompts += 1
+            return True
+
+    return BuffClient()
+
+
+def _enable_manual_plus_config(config):
+    config["buff"]["auto_send_buyer_offer"] = True
+    return config
+
+
+def test_manual_plus_order_sends_buyer_offer_and_skips_seller_prompt(monkeypatch):
+    client = _manual_plus_client()
+    config = _enable_manual_plus_config(_config())
+    config["buff"]["auto_ask_seller_to_send"] = True
+    kwargs, _pending, purchases = _checkout_args(wait_result=True)
+    monkeypatch.setattr(
+        purchase_settlement, "_fetch_smart_market_price",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        purchase_settlement,
+        "get_steam_credentials",
+        lambda: {"cookies": "steamLoginSecure=sec; sessionid=sess"},
+    )
+
+    paid = checkout.lock_and_confirm_payment(
+        client,
+        _item([{"id": "sell-1", "price": "10.0"}]),
+        config,
+        **kwargs,
+    )
+
+    assert paid == 10.0
+    assert client.offer_calls == [("steamLoginSecure=sec; sessionid=sess", ["bill-plus"])]
+    assert client.seller_prompts == 0
+    assert [record["buff_order_id"] for record in purchases] == ["bill-plus"]
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout() is None
+
+
+def test_buyer_offer_rejection_falls_back_to_seller_prompt(monkeypatch):
+    client = _manual_plus_client(
+        buyer_send_offer=lambda *_args: {
+            "success": False,
+            "data": {},
+            "error": "当前订单不允许发起报价",
+        }
+    )
+    config = _enable_manual_plus_config(_config())
+    config["buff"]["auto_ask_seller_to_send"] = True
+    kwargs, _pending, purchases = _checkout_args(wait_result=True)
+    monkeypatch.setattr(
+        purchase_settlement, "_fetch_smart_market_price",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        purchase_settlement, "get_steam_credentials",
+        lambda: {"cookies": "steamLoginSecure=sec"},
+    )
+
+    paid = checkout.lock_and_confirm_payment(
+        client,
+        _item([{"id": "sell-1", "price": "10.0"}]),
+        config,
+        **kwargs,
+    )
+
+    assert paid == 10.0
+    assert client.seller_prompts == 1
+    assert len(purchases) == 1
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout() is None
+
+
+def test_normal_mode_order_never_triggers_buyer_offer(monkeypatch):
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": True,
+                "order_id": "bill-normal",
+                "pay_url": "https://pay.invalid/normal",
+                "pay_type": "alipay",
+            }
+
+        def get_bill_order_pay_state(self, *_args):
+            return {"status": BUY_ORDER_PAY_PAID, "mode": 2, "state": "TO_DELIVER"}
+
+        def buyer_send_offer(self, *_args):
+            raise AssertionError("normal orders must never send buyer offers")
+
+    config = _enable_manual_plus_config(_config())
+    kwargs, _pending, purchases = _checkout_args(wait_result=True)
+    monkeypatch.setattr(
+        purchase_settlement, "_fetch_smart_market_price",
+        lambda *_args, **_kwargs: None,
+    )
+
+    paid = checkout.lock_and_confirm_payment(
+        BuffClient(),
+        _item([{"id": "sell-1", "price": "10.0"}]),
+        config,
+        **kwargs,
+    )
+
+    assert paid == 10.0
+    assert len(purchases) == 1
+
+
+def test_buyer_offer_write_unknown_halts_after_recording(monkeypatch):
+    def _raise_unknown(*_args):
+        raise BuffWriteResultUnknown(
+            "buyer offer timed out",
+            method="POST",
+            url="https://buff.invalid/buyer_send_offer",
+        )
+
+    client = _manual_plus_client(buyer_send_offer=_raise_unknown)
+    config = _enable_manual_plus_config(_config())
+    kwargs, _pending, purchases = _checkout_args(wait_result=True)
+    monkeypatch.setattr(
+        purchase_settlement, "_fetch_smart_market_price",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        purchase_settlement, "get_steam_credentials",
+        lambda: {"cookies": "steamLoginSecure=sec"},
+    )
+
+    with pytest.raises(models.PurchaseWriteResultUnknown) as exc_info:
+        checkout.lock_and_confirm_payment(
+            client,
+            _item([{"id": "sell-1", "price": "10.0"}]),
+            config,
+            **kwargs,
+        )
+
+    assert exc_info.value.committed_amount == 10.0
+    assert len(purchases) == 1
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    unresolved = get_unresolved_checkout()
+    assert unresolved["stage"] == "buyer_offer_unknown"
+    assert unresolved["order_id"] == "bill-plus"
+
+
+def test_known_lock_rejection_skips_item_without_halting_pipeline():
+    """卖家不支持当前支付方式等明确业务拒绝：跳过本件继续，而非停止全部购买。"""
+
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def lock_and_get_pay_url(self, *_args):
+            return {
+                "success": False,
+                "code": "FAIL",
+                "created": False,
+                "msg": "该饰品暂不支持此支付方式",
+            }
+
+    kwargs, _pending, purchases = _checkout_args()
+
+    result = checkout.lock_and_confirm_payment(
+        BuffClient(),
+        _item([{"id": "sell-1", "price": "10.0"}]),
+        _config(),
+        **kwargs,
+    )
+
+    assert result is None
+    assert purchases == []
+    from app.services.buff_checkout_guard import get_unresolved_checkout
+
+    assert get_unresolved_checkout() is None
 
 
 def test_cooling_down_has_dedicated_terminal_state():
@@ -1021,6 +1244,70 @@ def test_expired_snapshot_immediately_before_write_sends_no_post(monkeypatch):
 
     assert result is None
     assert client.lock_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("plan_price", "buff_cfg", "expected"),
+    [
+        # 比例制：容忍 = 参考价 × 比例，大额小额同一风险尺度
+        pytest.param(
+            4.49, {"price_tolerance_ratio": 0.02, "price_tolerance": 0.5}, 0.0898,
+            id="small_amount_scales_down",
+        ),
+        pytest.param(
+            500.0, {"price_tolerance_ratio": 0.02, "price_tolerance": 0.5}, 10.0,
+            id="large_amount_scales_up",
+        ),
+        # 未配置比例或参考价无效：回退到绝对金额
+        pytest.param(
+            10.0, {"price_tolerance": 0.5}, 0.5,
+            id="ratio_unset_falls_back_to_absolute",
+        ),
+        pytest.param(
+            None, {"price_tolerance_ratio": 0.02, "price_tolerance": 0.5}, 0.5,
+            id="invalid_reference_falls_back_to_absolute",
+        ),
+    ],
+)
+def test_effective_price_tolerance_scales_with_reference_price(
+    plan_price, buff_cfg, expected
+):
+    assert _effective_price_tolerance(plan_price, buff_cfg) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize(
+    ("price", "expected_lock_calls"),
+    [
+        # 参考价 10.0、比例 2% → 容忍 0.2：10.15 在内放行，10.4 超出拦截
+        pytest.param("10.15", 1, id="within_ratio_tolerance"),
+        pytest.param("10.4", 0, id="beyond_ratio_tolerance"),
+    ],
+)
+def test_checkout_ratio_tolerance_boundary(price, expected_lock_calls):
+    class BuffClient:
+        _pay_method = "alipay"
+
+        def __init__(self):
+            self.lock_calls = 0
+
+        def lock_and_get_pay_url(self, *_args):
+            self.lock_calls += 1
+            return {"success": False, "code": "FAIL", "created": False}
+
+    client = BuffClient()
+    config = _config()
+    config["buff"]["price_tolerance_ratio"] = 0.02
+    kwargs, _pending, _purchases = _checkout_args()
+
+    result = checkout.lock_and_confirm_payment(
+        client,
+        _item([{"id": "sell-1", "price": price}]),
+        config,
+        **kwargs,
+    )
+
+    assert result is None
+    assert client.lock_calls == expected_lock_calls
 
 
 def test_invalid_zero_lowest_price_is_rejected_before_quantity_math():

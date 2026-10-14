@@ -3,6 +3,7 @@
 from __future__ import annotations
 import time
 from typing import Any, Callable, Dict, List, Optional
+from app.configuration.repository import get_steam_credentials
 from app.services.buff_checkout_guard import resolve_checkout, update_checkout
 from buff import BuffAuthExpired, BuffRequestBlocked, BuffWriteResultUnknown
 from app.purchase.models import (
@@ -409,8 +410,18 @@ def _append_paid_single_order(
         order_id=str(order_id),
         reason="订单已写入本地交易记录",
     )
+    sent_buyer_offer = False
+    if bool((config.get("buff") or {}).get("auto_send_buyer_offer", False)):
+        sent_buyer_offer = _maybe_send_buyer_offer(
+            buff_client,
+            order_id,
+            game_buff,
+            checkout_intent_id,
+            unit_price * num,
+            log_fn,
+        )
     auto_ask_seller = bool((config.get("buff") or {}).get("auto_ask_seller_to_send", False))
-    if auto_ask_seller:
+    if auto_ask_seller and not sent_buyer_offer:
         try:
             if buff_client.ask_seller_to_send(order_id, game_buff) and log_fn:
                 log_fn("[Buff]   → 已提醒卖家发货，请留意 Steam 报价", "info")
@@ -442,10 +453,95 @@ def _append_paid_single_order(
             )
             _mark_committed(halted, unit_price * num)
             raise halted from exc
-    elif log_fn:
+    elif log_fn and not sent_buyer_offer:
         log_fn("[Buff]   → 已跳过自动催发货，以减少风控敏感写请求", "info")
     resolve_checkout(
         "single_purchase_recorded",
         expected_intent_id=checkout_intent_id,
     )
     return unit_price * num
+
+
+def _steam_cookies_string(raw: Any) -> str:
+    if isinstance(raw, dict):
+        return "; ".join(f"{key}={value}" for key, value in raw.items() if key)
+    return str(raw or "").strip()
+
+
+def _maybe_send_buyer_offer(
+    buff_client: Any,
+    order_id: str,
+    game_buff: str,
+    checkout_intent_id: str,
+    committed_amount: float,
+    log_fn: Optional[Callable[[str, str], None]],
+) -> bool:
+    """手动+ 订单：自动以买家身份发起 Steam 报价（BUFF 服务端代发）。
+
+    只有模式 5/8 且尚未发起报价的订单会尝试：把（加密的）Steam Cookie 交给
+    BUFF，由 BUFF 用该会话向卖家发起交易报价。返回 True 仅当报价已确认发起，
+    此时不再重复提醒卖家；未适用或 BUFF 明确拒绝时返回 False，调用方可回退到
+    提醒卖家。写请求结果未知时保持保守门禁：成交已记账但立即停止后续 BUFF
+    写请求。
+    """
+
+    try:
+        state = buff_client.get_bill_order_pay_state(str(order_id), game_buff)
+    except Exception as exc:
+        if log_fn:
+            log_fn(
+                f"[Buff]   → 查询订单状态失败，跳过自动发起报价 ({type(exc).__name__})",
+                "warn",
+            )
+        return False
+    if not isinstance(state, dict):
+        return False
+    if state.get("mode") not in (5, 8) or state.get("has_sent_offer"):
+        return False
+    cookies = _steam_cookies_string((get_steam_credentials() or {}).get("cookies"))
+    if not cookies:
+        if log_fn:
+            log_fn(
+                "[Buff]   → 该订单需要买家发起报价，但未配置 Steam 凭证，请在 APP 手动发起",
+                "warn",
+            )
+        return False
+    try:
+        result = buff_client.buyer_send_offer(cookies, [str(order_id)])
+    except (BuffAuthExpired, BuffRequestBlocked) as exc:
+        resolve_checkout(
+            "single_purchase_recorded_buyer_offer_blocked",
+            expected_intent_id=checkout_intent_id,
+        )
+        _mark_committed(exc, committed_amount)
+        raise
+    except Exception as exc:
+        update_checkout(
+            expected_intent_id=checkout_intent_id,
+            stage="buyer_offer_unknown",
+            order_id=str(order_id),
+            reason=f"{type(exc).__name__}: {exc}",
+            last_error_type=type(exc).__name__,
+        )
+        if log_fn:
+            log_fn(
+                f"[Buff]   → 成交已记录；自动发起报价结果未知 ({type(exc).__name__})，已停止后续 BUFF 写请求",
+                "warn",
+            )
+        halted = PurchaseWriteResultUnknown(
+            "成交已记录，但自动发起报价的写请求结果未知",
+            order_id=str(order_id),
+        )
+        _mark_committed(halted, committed_amount)
+        raise halted from exc
+    if isinstance(result, dict) and result.get("success"):
+        if log_fn:
+            log_fn("[Buff]   → 已自动发起 Steam 报价（BUFF 代发），等待卖家回应", "info")
+        return True
+    error = result.get("error") if isinstance(result, dict) else "响应异常"
+    if log_fn:
+        log_fn(
+            f"[Buff]   → 自动发起报价失败（{error or '未知原因'}），可稍后在 APP 手动发起",
+            "warn",
+        )
+    return False

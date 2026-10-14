@@ -11,6 +11,7 @@ import requests
 import urllib3
 from requests.cookies import RequestsCookieJar
 
+from .crypto import encrypt_buff_payload
 from .request_policy import (
     BuffAuthExpired,
     BuffRateLimited,
@@ -143,42 +144,95 @@ API_BATCH_BUY_CREATE = "https://buff.163.com/api/market/goods/batch_buy/create"
 API_BATCH_WX_PAY_QRCODE = "https://buff.163.com/api/market/goods/batch_buy/wx_pay_qrcode"
 API_ASK_SELLER_SEND = "https://buff.163.com/api/market/bill_order/ask_seller_to_send_offer"
 API_STEAM_TRADE = "https://buff.163.com/api/market/steam_trade"
-API_BUY_ORDER_CHECK_STATE = "https://buff.163.com/api/market/buy_order/check_state"
+API_BILL_ORDER_BATCH_INFO = "https://buff.163.com/api/market/bill_order/batch/info"
+API_MANUAL_PLUS_BUYER_SEND_OFFER = (
+    "https://buff.163.com/api/market/manual_plus/buyer_send_offer"
+)
 ASK_SELLER_MAX_ATTEMPTS = 3
 ASK_SELLER_BETWEEN_REQUEST_SECONDS = 1.5
 BUY_ORDER_PAY_PAID = "paid"
 BUY_ORDER_PAY_FAILED = "failed"
 BUY_ORDER_PAY_PENDING = "pending"
 BUY_ORDER_PAY_UNKNOWN = "unknown"
-# BUFF 收银台对单个买单的付款状态机（与网页客户端轮询逻辑一致）：
-# state=6 为待付款（pay_expire_timeout<0 表示支付窗口已过），state=7 为付款失败，
-# 其余数值状态均为已支付终态。
-BUY_ORDER_PAY_STATE_PAYING = 6
-BUY_ORDER_PAY_STATE_FAILED = 7
 
 
-def classify_buy_order_pay_state(state, pay_expire_timeout) -> str:
-    """把 ``buy_order/check_state`` 的原始字段归类为付款状态。
+def _order_int(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
-    无法解析的状态一律返回 unknown，调用方必须保持人工对账门禁，
-    不得把含糊响应推断为已支付。
+
+def _has_time_value(value) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    return str(value).strip() not in ("", "0", "None", "null")
+
+
+def _is_passwordless_cashier_response(result) -> bool:
+    """识别免密（自动扣款）订单的收银台响应。
+
+    免密订单不会产出可用的支付链接：``page_pay`` 实测返回 code=OK，data 中
+    只有 ``auto_pay`` / ``buff_pay_channel`` 渠道配置，没有 ``elements_v2`` /
+    ``elements`` / ``url`` 等链接字段。判据刻意保守：两个渠道键必须同时出现
+    且不含任何链接字段；字段集变化时退回原有重试行为，不会误判跳过付款。
+    """
+    if not isinstance(result, dict) or str(result.get("code") or "").strip() != "OK":
+        return False
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return False
+    if "auto_pay" not in data or "buff_pay_channel" not in data:
+        return False
+    return not any(data.get(field) for field in ("elements_v2", "elements", "url"))
+
+
+def classify_bill_order_pay_state(item) -> str:
+    """把 ``bill_order/batch/info`` 的单条订单归类为付款状态。
+
+    判定基于两类证据（对真实免密订单的观测 + BUFF 网页客户端
+    「订单创建后确认付款」的轮询规则）：
+
+    - 直接付款证据：``buyer_pay_time`` 在扣款完成后立即写入（实测免密扣款
+      在订单创建后数秒内完成）；
+    - 状态证据：``state`` 为 TO_DELIVER/DELIVERING/SUCCESS，或各 mode 对应
+      的 progress 终态（105/106、305/309、mode7 的 202）；``progress=104``
+      与待付款窗口超时（progress=102 且 pay_expire_timeout<0）为付款失败。
+
+    无法解析的响应一律返回 unknown，调用方必须保持人工对账门禁，不得把
+    含糊响应推断为已支付。
     """
 
-    if isinstance(state, bool):
+    if not isinstance(item, dict):
         return BUY_ORDER_PAY_UNKNOWN
-    try:
-        state_value = int(state)
-    except (TypeError, ValueError):
-        return BUY_ORDER_PAY_UNKNOWN
-    try:
-        expires = float(pay_expire_timeout)
-    except (TypeError, ValueError):
-        expires = 0.0
-    if state_value == BUY_ORDER_PAY_STATE_FAILED:
+    mode = _order_int(item.get("mode"))
+    progress = _order_int(item.get("progress"))
+    state = str(item.get("state") or "").strip().upper()
+    if _has_time_value(item.get("buyer_pay_time")):
+        return BUY_ORDER_PAY_PAID
+    if (
+        state in ("TO_DELIVER", "DELIVERING")
+        or state == "SUCCESS"
+        or progress in (105, 106)
+        or (mode == 5 and progress in (305, 309))
+        or (mode == 8 and progress in (305, 309))
+        or (mode == 7 and progress == 202)
+    ):
+        return BUY_ORDER_PAY_PAID
+    if progress == 104:
         return BUY_ORDER_PAY_FAILED
-    if state_value == BUY_ORDER_PAY_STATE_PAYING:
-        return BUY_ORDER_PAY_FAILED if expires < 0 else BUY_ORDER_PAY_PENDING
-    return BUY_ORDER_PAY_PAID
+    if progress == 102 and item.get("pay_expire_time"):
+        try:
+            expired = float(item.get("pay_expire_timeout")) < 0
+        except (TypeError, ValueError):
+            expired = False
+        if expired:
+            return BUY_ORDER_PAY_FAILED
+    if mode is None and progress is None and not state:
+        return BUY_ORDER_PAY_UNKNOWN
+    return BUY_ORDER_PAY_PENDING
 from utils.cookies import parse_cookies as _parse_cookies
 def _csrf(cookies_dict: dict) -> str:
     return cookies_dict.get("csrf_token", "").strip('"')
@@ -583,16 +637,18 @@ class BuffBuyer:
         except Exception:
             return None
 
-    def get_buy_order_pay_state(self, order_id: str, game: str = "csgo") -> str:
-        """只读查询一个买单的收银台付款状态。
+    def get_bill_order_pay_state(self, order_id: str, game: str = "csgo") -> dict:
+        """只读查询一个买单的付款/发货状态。
 
         免密支付（网易宝快捷代扣）在订单创建后由 BUFF 自动扣款，此时不会
-        返回支付链接；网页客户端改用 ``buy_order/check_state`` 轮询确认结果。
-        本方法只读，不会创建、修改或重试任何订单写请求。
+        返回支付链接；网页客户端在「订单创建后的付款确认」阶段轮询
+        ``/api/market/bill_order/batch/info`` 判定结果，本方法使用同一接口
+        与同一判定规则。只读、可安全轮询，不会创建、修改或重试任何订单写
+        请求；返回值包含 ``status`` 及用于日志诊断的非敏感字段。
         """
 
         params = {
-            "buy_order_id": str(order_id),
+            "bill_orders": str(order_id),
             "_": str(int(time.time() * 1000)),
         }
         h = {
@@ -600,20 +656,27 @@ class BuffBuyer:
         }
         try:
             res = self._make_request(
-                "GET", API_BUY_ORDER_CHECK_STATE, params=params, headers=h
+                "GET", API_BILL_ORDER_BATCH_INFO, params=params, headers=h
             )
         except (BuffAuthExpired, BuffRequestBlocked):
             raise
         except Exception:
-            return BUY_ORDER_PAY_UNKNOWN
-        if not isinstance(res, dict) or res.get("code") != "OK":
-            return BUY_ORDER_PAY_UNKNOWN
-        data = res.get("data")
-        if not isinstance(data, dict):
-            return BUY_ORDER_PAY_UNKNOWN
-        return classify_buy_order_pay_state(
-            data.get("state"), data.get("pay_expire_timeout")
-        )
+            return {"status": BUY_ORDER_PAY_UNKNOWN}
+        data = res.get("data") if isinstance(res, dict) and res.get("code") == "OK" else None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            return {"status": BUY_ORDER_PAY_UNKNOWN}
+        item = items[0]
+        return {
+            "status": classify_bill_order_pay_state(item),
+            "mode": item.get("mode"),
+            "state": item.get("state"),
+            "progress": item.get("progress"),
+            "pay_expire_timeout": item.get("pay_expire_timeout"),
+            "buyer_pay_time": item.get("buyer_pay_time"),
+            "has_sent_offer": item.get("has_sent_offer"),
+            "buyer_send_offer_timeout": item.get("buyer_send_offer_timeout"),
+        }
 
     def get_sell_orders(self, goods_id: int, game: str = "csgo") -> Optional[list]:
         params = {
@@ -696,7 +759,17 @@ class BuffBuyer:
                 msg_str = str(err_msg)
                 if "Cooling Down" in msg_str:
                     return {"success": False, "code": "COOLING_DOWN"}
-                return {"success": False, "code": "FAIL", "msg": err_msg}
+                # BUFF 对写请求返回了明确的业务拒绝（如「该饰品暂不支持此
+                # 支付方式」），订单未创建：标记 created=False，调用方按
+                # 已知失败跳过本件并继续，而不是按结果未知停机。传输失败、
+                # 非 JSON 响应与风控重定向仍由 _make_request 以
+                # BuffWriteResultUnknown 抛出，保持未知结果门禁。
+                return {
+                    "success": False,
+                    "code": "FAIL",
+                    "created": False,
+                    "msg": err_msg,
+                }
             data = res.get("data")
             if not isinstance(data, dict):
                 raise BuffWriteResultUnknown(
@@ -758,6 +831,9 @@ class BuffBuyer:
 
         BUFF can acknowledge a buy before its payment QR code is materialised.
         These are GET-only retries: they never create or alter another order.
+        免密（自动扣款）订单不会产出链接（实测响应只有 auto_pay /
+        buff_pay_channel）；识别到该签名时立即放弃剩余重试，由调用方转入
+        免密付款状态确认。
         """
 
         lookup = (
@@ -798,6 +874,10 @@ class BuffBuyer:
             self._record_payment_lookup_diagnostic(
                 payment_kind, order_id, attempt, len(delays)
             )
+            if _is_passwordless_cashier_response(self._last_payment_lookup_response):
+                # 免密订单不会有支付链接：跳过剩余重试（每单省 3 次请求），
+                # 立即返回，由调用方转入免密付款状态确认。
+                return None
         return None
 
     def _record_payment_lookup_diagnostic(
@@ -825,6 +905,7 @@ class BuffBuyer:
         meta = dict(self._last_response_meta)
         data = result.get("data")
         message = result.get("error") or result.get("msg") or result.get("message")
+        passwordless = _is_passwordless_cashier_response(result)
         diagnostic = {
             "payment_kind": payment_kind,
             "order_id": str(order_id),
@@ -840,20 +921,42 @@ class BuffBuyer:
             "error_type": type(exception).__name__ if exception else "",
             "message": str(exception or message or "")[:300],
         }
+        if passwordless:
+            # 只记录 auto_pay 的子键名用于确认签名，绝不保留任何渠道值。
+            auto_pay = data.get("auto_pay")
+            diagnostic["auto_pay_keys"] = (
+                sorted(str(key) for key in auto_pay.keys())[:20]
+                if isinstance(auto_pay, dict)
+                else []
+            )
         self.last_payment_lookup_diagnostic = diagnostic
-        logger.warning(
-            "BUFF 支付链接查询未成功 order_id=%s kind=%s attempt=%d/%d "
-            "http=%s code=%s data_type=%s data_keys=%s error=%s",
-            diagnostic["order_id"],
-            diagnostic["payment_kind"],
-            diagnostic["attempt"],
-            diagnostic["attempts"],
-            diagnostic["http_status"],
-            diagnostic["code"] or "-",
-            diagnostic["data_type"],
-            ",".join(diagnostic["data_keys"]) or "-",
-            diagnostic["message"] or "-",
-        )
+        if passwordless:
+            logger.info(
+                "BUFF 订单 %s 为免密自动扣款订单（无收银台链接）kind=%s attempt=%d/%d "
+                "http=%s code=%s data_keys=%s auto_pay_keys=%s",
+                diagnostic["order_id"],
+                diagnostic["payment_kind"],
+                diagnostic["attempt"],
+                diagnostic["attempts"],
+                diagnostic["http_status"],
+                diagnostic["code"] or "-",
+                ",".join(diagnostic["data_keys"]) or "-",
+                ",".join(diagnostic["auto_pay_keys"]) or "-",
+            )
+        else:
+            logger.warning(
+                "BUFF 支付链接查询未成功 order_id=%s kind=%s attempt=%d/%d "
+                "http=%s code=%s data_type=%s data_keys=%s error=%s",
+                diagnostic["order_id"],
+                diagnostic["payment_kind"],
+                diagnostic["attempt"],
+                diagnostic["attempts"],
+                diagnostic["http_status"],
+                diagnostic["code"] or "-",
+                diagnostic["data_type"],
+                ",".join(diagnostic["data_keys"]) or "-",
+                diagnostic["message"] or "-",
+            )
 
     def _get_alipay_url(self, game: str, order_id: str) -> Optional[str]:
         params = {"bill_order_id": str(order_id), "_": str(int(time.time() * 1000))}
@@ -1120,3 +1223,61 @@ class BuffBuyer:
 
         logger.info("提醒卖家发货全部完成 %s/%s", len(succeeded_ids), len(ids))
         return len(succeeded_ids) == len(ids)
+
+    def buyer_send_offer(self, steam_cookies: str, bill_orders) -> dict:
+        """买家侧发起 Steam 报价（手动+ 订单，BUFF 服务端代发）。
+
+        与官方 APP「一键发送」同一机制：把加密后的 Steam Cookie 提交给
+        BUFF，由 BUFF 用该 Steam 会话向卖家发起交易报价；报价的卖家与物品
+        均由 BUFF 订单数据决定，调用方只提供自己的 Steam 会话。只接受显式
+        传入的 Cookie，适配器不读取应用配置。
+
+        返回 ``{"success": bool, "data": dict, "error": str}``；写请求结果
+        未知时向上抛出，调用方不得自动重试。
+        """
+
+        if not str(steam_cookies or "").strip():
+            return {"success": False, "data": {}, "error": "缺少 Steam 凭证"}
+        ids = []
+        seen_ids = set()
+        for raw_id in bill_orders if isinstance(bill_orders, (list, tuple)) else [bill_orders]:
+            order_id = _normalize_server_identifier(raw_id)
+            if order_id and order_id not in seen_ids:
+                seen_ids.add(order_id)
+                ids.append(order_id)
+        if not ids:
+            return {"success": False, "data": {}, "error": "缺少有效的买单号"}
+
+        payload = {
+            "buyer_info": encrypt_buff_payload(str(steam_cookies).strip()),
+            "bill_orders": ids,
+        }
+        h = {"Referer": "https://buff.163.com/market/buy_order/history"}
+        res = self._make_request(
+            "POST",
+            API_MANUAL_PLUS_BUYER_SEND_OFFER,
+            headers=h,
+            data=json.dumps(payload),
+        )
+        if not isinstance(res, dict) or res.get("code") != "OK":
+            error = "BUFF 返回异常"
+            if isinstance(res, dict):
+                error = str(
+                    res.get("error")
+                    or res.get("msg")
+                    or res.get("message")
+                    or res.get("code")
+                    or error
+                )
+            data = res.get("data") if isinstance(res, dict) else None
+            return {
+                "success": False,
+                "data": data if isinstance(data, dict) else {},
+                "error": error,
+            }
+        data = res.get("data")
+        return {
+            "success": True,
+            "data": data if isinstance(data, dict) else {},
+            "error": "",
+        }

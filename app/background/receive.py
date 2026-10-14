@@ -19,7 +19,10 @@ from app.background.safety import (
 
 @stoppable_worker
 def receive_worker() -> None:
-    from app.workflows.receiving import try_receive_once
+    from app.workflows.receiving import (
+        reconcile_delivered_purchases,
+        try_receive_once,
+    )
     from app.services.buff_auth import get_buff_auth_lock
     from app.services.buff_client import create_buff_client_from_config
     from app.services.buff_checkout_guard import buff_activity_guard
@@ -68,8 +71,23 @@ def receive_worker() -> None:
                         scan_inventory=scan_cs2_inventory,
                         update_purchase_by_id=update_purchase_by_id,
                     )
+                    # 买家发起报价（mode 5/8）的订单不会出现在待收货报价
+                    # 列表里，需要按订单交付状态 + 库存名字单独对账。
+                    m = reconcile_delivered_purchases(
+                        get_purchases,
+                        lambda: buff_client,
+                        scan_inventory=scan_cs2_inventory,
+                        update_purchase_by_id=update_purchase_by_id,
+                    )
             if n > 0:
                 log(f"receive_worker: 本轮收取到 {n} 件物品", "info", category="receive")
+            if m > 0:
+                log(
+                    f"receive_worker: 交付对账补全 {m} 件待收货记录"
+                    "（买家发起报价 / 已在别处完成交付）",
+                    "info",
+                    category="receive",
+                )
         except BuffRateLimited as e:
             log(f"receive_worker: Buff 请求处于限流冷却: {e}", "warn", category="receive")
             wait(min(60, max(1, int(e.retry_after))))

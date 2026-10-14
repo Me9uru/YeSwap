@@ -11,6 +11,7 @@ import "element-plus/es/components/message/style/css";
 import "element-plus/es/components/option/style/css";
 import "element-plus/es/components/pagination/style/css";
 import "element-plus/es/components/select/style/css";
+import "element-plus/es/components/switch/style/css";
 import "element-plus/es/components/table/style/css";
 import "element-plus/es/components/table-column/style/css";
 import "element-plus/es/components/tag/style/css";
@@ -29,6 +30,7 @@ import {
   ElOption,
   ElPagination,
   ElSelect,
+  ElSwitch,
   ElTable,
   ElTableColumn,
   ElTag,
@@ -50,7 +52,8 @@ const rows = ref([]),
   selection = ref([]),
   dialog = ref(""),
   form = ref({}),
-  targets = ref([]);
+  targets = ref([]),
+  includeSold = ref(false);
 async function beforeLeave() {
   return (
     !busy.value &&
@@ -65,14 +68,17 @@ const filtered = computed(() =>
       props.mode === "sales"
         ? row.type === "sale"
         : row.type === "purchase" &&
-          (props.mode !== "purchases" || !(Number(row.sale_price) > 0));
+          (includeSold.value || !(Number(row.sale_price) > 0));
     return (
       match &&
       (row.name || "").toLowerCase().includes(search.value.toLowerCase())
     );
   }),
 );
-watch(search, () => {
+const sellableSelection = computed(() =>
+  selection.value.filter((row) => !(Number(row.sale_price) > 0)),
+);
+watch([search, includeSold], () => {
   page.value = 1;
 });
 async function load() {
@@ -92,11 +98,28 @@ function status(row) {
       ? "待收货"
       : row.listing
         ? "在售"
-        : "持有";
+        : row.listing_status === "error"
+          ? "待修复"
+          : "持有";
+}
+function statusType(row) {
+  if (Number(row.sale_price) > 0) return "success";
+  if (row.pending_receipt) return "warning";
+  return row.listing_status === "error" && !row.listing ? "danger" : "info";
+}
+function statusHint(row) {
+  return status(row) === "待修复"
+    ? "Steam 挂单已消失且无法确认成交，请到 系统设置 → 数据与维护 运行「修复记录」"
+    : "";
 }
 function open(kind, row) {
   dialog.value = kind;
-  targets.value = clone(row ? [row] : selection.value);
+  const chosen = row
+    ? [row]
+    : kind === "sell"
+      ? sellableSelection.value
+      : selection.value;
+  targets.value = clone(chosen);
   form.value =
     kind === "add"
       ? {
@@ -220,6 +243,11 @@ const vLoading = ElLoading.directive;
     <div class="toolbar">
       <h2>交易明细</h2>
       <el-input v-model="search" placeholder="搜索饰品名称" clearable />
+      <el-switch
+        v-if="mode === 'purchases'"
+        v-model="includeSold"
+        active-text="含已售出"
+      />
       <el-button :loading="busy" @click="run(load)">刷新记录</el-button>
       <el-button
         v-if="mode !== 'sales'"
@@ -247,7 +275,7 @@ const vLoading = ElLoading.directive;
     <div v-if="selection.length" class="toolbar">
       <el-tag>已选 {{ selection.length }} 条</el-tag>
       <el-button
-        v-if="mode === 'purchases'"
+        v-if="mode === 'purchases' && sellableSelection.length"
         :disabled="busy"
         @click="open('sell')"
       >
@@ -297,21 +325,13 @@ const vLoading = ElLoading.directive;
       </el-table-column>
       <el-table-column v-if="mode !== 'sales'" label="状态" width="95">
         <template #default="{ row }">
-          <el-tag
-            :type="
-              row.sale_price
-                ? 'success'
-                : row.pending_receipt
-                  ? 'warning'
-                  : 'info'
-            "
-          >
+          <el-tag :type="statusType(row)" :title="statusHint(row)">
             {{ status(row) }}
           </el-tag>
         </template>
       </el-table-column>
       <el-table-column
-        v-if="mode === 'history'"
+        v-if="mode === 'purchases' && includeSold"
         label="售出价（税前 CNY）"
         width="165"
       >
@@ -334,7 +354,7 @@ const vLoading = ElLoading.directive;
             编辑
           </el-button>
           <el-button
-            v-if="mode === 'purchases'"
+            v-if="mode === 'purchases' && !(Number(row.sale_price) > 0)"
             link
             type="primary"
             :disabled="busy"

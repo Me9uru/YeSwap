@@ -56,11 +56,12 @@ routes -> workflows / services -> 业务域 -> storage / 平台适配器 -> util
 | `workflows/maintenance.py` | 备份导入与购买工作流之间的维护互斥 |
 | `accounts/repository.py` | 账号元数据及浏览器资料目录 |
 | `configuration/schema.py`、`repository.py` | 配置校验、持久化及平台凭证访问 |
-| `purchase/selection.py`、`market.py` | 候选筛选、稳定性、平台报价与预检 |
+| `purchase/selection.py`、`market.py` | 候选筛选、稳定性、平台报价、买入价格容忍换算与预检 |
 | `purchase/checkout.py` | 购买前验证、采购量与单件/批量路径选择 |
 | `purchase/single.py`、`batch.py` | 各自购买请求及结果分类；共享显式 `PurchaseContext` |
-| `purchase/payment.py` | 付款等待、邮件确认与订单关联的人工确认 |
-| `purchase/settlement.py`、`identity.py` | 结算落库、部分成交、凭证一致性 |
+| `purchase/payment.py` | 免密扣款状态确认、付款等待、邮件确认与订单关联的人工确认 |
+| `purchase/settlement.py`、`identity.py` | 结算落库、部分成交、凭证一致性及手动+（mode 5/8）订单的买家报价代发 |
+| `buff/buyer.py`、`crypto.py` | BUFF 市场请求适配（买单、付款/发货状态、催发货、买家代发报价）；`crypto.py` 只负责加密提交给 BUFF 的 Steam 会话载荷 |
 | `strategies/catalog.py`、`module_specs.py`、`system_presets.py`、`registry.py` | 策略约束、内置模块、系统预设及用户模块登记 |
 | `workflows/schedule.py` | 购买时段和配置时区规则 |
 | `services/buff_browser_probe.py` | BUFF 浏览器页面挑战检测与用户代理读取 |
@@ -116,7 +117,8 @@ Vite 将生产资源构建到 `web/dist/`，FastAPI 只托管该目录。`web/di
 
 库存与市场价定时器随应用挂载与卸载统一启动、回收，读取已保存的刷新间隔。设置只提交修改
 字段，不以旧配置快照覆盖策略中心的更新。付款确认固定捕获所核对的订单号；对账保留
-`intent_id`；交易记录优先携带稳定数据库 ID，实际到账使用 `sale_proceeds`。请求期间禁止
+`intent_id`；交易记录优先携带稳定数据库 ID，实际到账使用 `sale_proceeds`；交易明细的
+「含已售出」开关只是视图过滤，批量售出只提交未售出记录，挂单异常显示「待修复」。请求期间禁止
 重复提交，失败不自动重试写入。策略模拟在草稿变化后失效；自定义策略启用前必须模拟并确认
 差异；固定模块、依赖与互斥保留前后端校验。
 
@@ -132,6 +134,12 @@ Vite 将生产资源构建到 `web/dist/`，FastAPI 只托管该目录。`web/di
 - 金额必须明确平台币种、展示金额与最小货币单位；沿用现有转换函数，不在调用处散落
   `* 100`、汇率或手续费计算。
 - 不移除 BUFF 请求节流、checkout 持久门禁、跨进程锁或 Steam 风控保护。
+- Steam 会话等凭证交给第三方代发（如 BUFF 手动+ 代发报价）必须经 `buff/crypto.py`
+  加密，且仅在 `buff.auto_send_buyer_offer` 显式开启时提交；该接口是真实写操作，
+  结果未知时按未知结果门禁停止后续写请求并等待人工对账。
+- 人工对账解除门禁时必须同步复位可解除的停机步骤（`BUFF_WRITE_RESULT_UNKNOWN`、
+  `BUFF_ORDER_CREATED_PENDING`），避免后台 BUFF 只读请求被已核对的门禁挡住；冷却与
+  异常停机不属于可解除范畴。
 - 文件持久化沿用同目录临时文件、flush/fsync 和原子替换；数据库写入沿用既有事务边界。
 - 日志和异常信息不得输出 Cookie、密码、`shared_secret`、`identity_secret`、邮箱授权码、
   代理凭据或完整支付信息。
@@ -151,7 +159,7 @@ Vite 将生产资源构建到 `web/dist/`，FastAPI 只托管该目录。`web/di
 - 策略模拟是样例执行，不是历史回测或实盘验证。未真实计算的步骤必须标为 `sample`，
   交易动作必须跳过。
 - 前端测试使用 Vitest/Vue Test Utils 的组件交互，覆盖页面切换、配置增量、策略模拟失效、
-  付款订单变化、重复点击和到账金额字段。测试 mock 所有请求。
+  付款订单变化、重复点击、到账金额字段与交易视图过滤。测试 mock 所有请求。
   `npm --prefix web run preview:isolated` 提供独立视觉验收页面：API 使用内存样例，拒绝
   写请求，不会连接真实后端。
 

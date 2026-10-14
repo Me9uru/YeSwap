@@ -10,8 +10,13 @@ from utils.delay import jittered_sleep
 
 
 # 免密支付确认窗口：订单创建且拿不到支付链接后，立即查询一次付款状态，
-# 再按固定节奏重试；实际间隔还会叠加 BUFF 请求节流的最小间隔。
-PASSWORDLESS_PAYMENT_POLL_DELAYS = (0.0, 1.5, 2.5, 4.0, 5.0, 6.0, 8.0)
+# 再按逐步放宽的节奏重试；累计等待约 3 分钟后放弃并保持人工对账门禁
+# （网页客户端自身最长等待 5 分钟）。实际间隔还会叠加 BUFF 请求节流的最小间隔。
+PASSWORDLESS_PAYMENT_POLL_DELAYS = (
+    0.0,
+    2.0, 2.0, 3.0, 3.0, 4.0, 5.0, 5.0, 6.0, 8.0, 8.0,
+    10.0, 10.0, 12.0, 12.0, 15.0, 15.0, 20.0, 20.0, 20.0,
+)
 
 
 def _confirm_passwordless_payment(
@@ -23,11 +28,13 @@ def _confirm_passwordless_payment(
 ) -> Optional[str]:
     """确认免密（自动扣款）支付的最终结果。
 
-    只读轮询 BUFF 买单付款状态；返回 ``BUY_ORDER_PAY_PAID`` /
-    ``BUY_ORDER_PAY_FAILED``，等待窗口内未确认或查询异常时返回 ``None``。
-    只有明确已支付才允许继续结算，其余结果都必须退回人工对账门禁。
+    只读轮询 BUFF 买单付款状态（bill_order/batch/info）；返回
+    ``BUY_ORDER_PAY_PAID`` / ``BUY_ORDER_PAY_FAILED``，等待窗口内未确认或
+    查询异常时返回 ``None``。只有明确已支付才允许继续结算，其余结果都必须
+    退回人工对账门禁；每次状态变化都会记录 mode/state/progress 便于排查。
     """
 
+    last_signature = None
     for delay in PASSWORDLESS_PAYMENT_POLL_DELAYS:
         if is_stop_requested is not None and is_stop_requested():
             return None
@@ -36,7 +43,7 @@ def _confirm_passwordless_payment(
             if is_stop_requested is not None and is_stop_requested():
                 return None
         try:
-            state = buff_client.get_buy_order_pay_state(str(order_id), game)
+            result = buff_client.get_bill_order_pay_state(str(order_id), game)
         except Exception as exc:
             if log_fn:
                 log_fn(
@@ -44,9 +51,29 @@ def _confirm_passwordless_payment(
                     "warn",
                 )
             return None
-        if state == BUY_ORDER_PAY_PAID:
+        if not isinstance(result, dict):
+            result = {"status": None}
+        status = result.get("status")
+        signature = (
+            result.get("mode"),
+            result.get("state"),
+            result.get("progress"),
+        )
+        if log_fn and signature != last_signature:
+            verdict = {
+                BUY_ORDER_PAY_PAID: "已支付",
+                BUY_ORDER_PAY_FAILED: "付款失败",
+            }.get(status, "继续等待")
+            log_fn(
+                f"[Buff]   → 免密付款状态 mode={result.get('mode')} "
+                f"state={result.get('state')} progress={result.get('progress')} "
+                f"paid_time={result.get('buyer_pay_time') or '-'} → {verdict}",
+                "info",
+            )
+            last_signature = signature
+        if status == BUY_ORDER_PAY_PAID:
             return BUY_ORDER_PAY_PAID
-        if state == BUY_ORDER_PAY_FAILED:
+        if status == BUY_ORDER_PAY_FAILED:
             return BUY_ORDER_PAY_FAILED
     if log_fn:
         log_fn(
